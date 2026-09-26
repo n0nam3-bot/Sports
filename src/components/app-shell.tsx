@@ -34,6 +34,7 @@ export default function AppShell() {
   const [activeId, setActiveId] = useState<number | null>(null);
   const [activeRun, setActiveRun] = useState<RunC | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [launching, setLaunching] = useState(false);
   const [clock, setClock] = useState("");
   const activeIdRef = useRef<number | null>(null);
   activeIdRef.current = activeId;
@@ -99,16 +100,23 @@ export default function AppShell() {
   }, [activeId, loadRuns, loadAgents]);
 
   const launch = useCallback(async () => {
-    const res = await fetch("/api/runs", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ date, sports }),
-    });
-    const data = await res.json();
-    if (data.id) {
-      setActiveId(data.id);
-      setActiveRun(null);
-    } else flash(data.error ?? "launch failed");
+    setLaunching(true);
+    try {
+      const res = await fetch("/api/runs", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ date, sports }),
+      });
+      const data = await res.json();
+      if (data.id) {
+        setActiveId(data.id);
+        setActiveRun(null);
+      } else flash(data.error ?? "launch failed");
+    } catch {
+      flash("launch request dropped — retry");
+    } finally {
+      setLaunching(false);
+    }
   }, [date, sports, flash]);
 
   const grade = useCallback(async () => {
@@ -253,6 +261,7 @@ export default function AppShell() {
             reloadSlate={loadSlate}
             launch={launch}
             running={!!running}
+            launching={launching}
             activeRun={activeRun}
             card={cardForDate}
           />

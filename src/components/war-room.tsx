@@ -44,6 +44,7 @@ export default function WarRoom(props: {
   reloadSlate: () => void;
   launch: () => void;
   running: boolean;
+  launching?: boolean;
   activeRun: RunC | null;
   card: RunC | null;
 }) {
@@ -108,10 +109,10 @@ export default function WarRoom(props: {
             </NeonButton>
             <NeonButton
               onClick={props.launch}
-              disabled={props.running || props.slateLoading || !slate || slate.counts.pre === 0}
+              disabled={props.running || props.launching || props.slateLoading || !slate || slate.counts.pre === 0}
               className="!px-7 !py-3 text-[13px]"
             >
-              {props.running ? (
+              {props.launching || props.running ? (
                 <><Loader2 className="h-4 w-4 animate-spin" /> cluster running…</>
               ) : (
                 <><Play className="h-4 w-4" /> run the cluster</>
@@ -135,6 +136,14 @@ export default function WarRoom(props: {
       </Panel>
 
       {/* ============ kernel console ============ */}
+      {props.launching && !activeRun && (
+        <Panel className="panel-glow rise flex items-center gap-3 px-4 py-3.5">
+          <Brain className="h-4 w-4 text-[#37ff8b] blink" />
+          <span className="font-mono text-[11px] uppercase tracking-[0.2em] text-[#5f7089]">
+            dispatching agents — server cluster is booting the run (can take ~20-50s on hosted tiers)…
+          </span>
+        </Panel>
+      )}
       {showConsole && activeRun && (
         <Panel className={cx("rise overflow-hidden", activeRun.status === "running" && "panel-glow")}>
           <div className="flex items-center justify-between border-b border-white/8 px-4 py-2.5">
