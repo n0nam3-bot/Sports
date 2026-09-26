@@ -50,15 +50,16 @@ npm run dev
 **GitHub Pages cannot run this app** (it is static-only: no Node server, no Postgres, no API routes).
 Host the full app instead — every device then reaches it by URL.
 
-### Option A — Vercel + Neon (both free, ~10 min)
+### Option A — Vercel + Neon (both free, works entirely from a phone browser)
 1. Push the repo to GitHub, then [vercel.com/new](https://vercel.com/new) → **Import** the repo
    (framework auto-detected: Next.js — leave all settings default).
 2. Create a free Postgres at [neon.tech](https://neon.tech) → copy the **pooled connection string**.
 3. Vercel → Project → Settings → Environment Variables → `DATABASE_URL` = your Neon string
-   (check **Production** — and Preview if you use it). The build itself no longer needs it.
-4. From your laptop, create the tables once (the TS config picks up the env var):
-   `DATABASE_URL="your-neon-url" npx drizzle-kit push`
-5. Redeploy. Done — open the `*.vercel.app` URL on any phone/laptop.
+   (check **Production** — and Preview if you use it). The build itself never needs it.
+4. Redeploy, then open `https://your-app.vercel.app/api/setup` once — it self-creates the tables
+   and seeds the roster (`{"ok":true}`). **No laptop or terminal required.**
+   (First site load also auto-creates everything; `/api/setup` is just instant peace of mind.)
+5. Done — open the `*.vercel.app` URL on any phone/laptop.
 6. Optional: add `GEMINI_API_KEY` / `XAI_API_KEY` / `OPENROUTER_API_KEY` env vars to awaken the LLM swarm
    (without keys it runs the built-in quant core). Free-tier functions are limited to 60s, so run
    1–3 sports per card on hosted plans; heavy multi-league + LLM nights prefer a long-lived host.
