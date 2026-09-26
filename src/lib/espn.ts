@@ -24,13 +24,26 @@ export interface OddsInfo {
   provider: string;
   details: string; // e.g. "LAL -3.5"
   homeSpread: number | null; // home perspective spread
+  homeSpreadOdds: number | null; // real juice on the home side
+  awaySpreadOdds: number | null;
   homeML: number | null;
   awayML: number | null;
   overUnder: number | null;
   overOdds: number | null;
   underOdds: number | null;
-  homeTeamTotal: number | null;
+  homeTeamTotal: number | null; // book-posted if present, else derived
   awayTeamTotal: number | null;
+  teamTotalsDerived: boolean;
+}
+
+export interface PlayerLeader {
+  athlete: string;
+  teamAbbr: string;
+  position: string;
+  category: string; // espn category name
+  stat: string; // our normalized stat key
+  seasonValue: number; // raw value from the feed
+  perGame: number | null; // normalized per-game rate
 }
 
 export interface RestInfo {
@@ -59,6 +72,7 @@ export interface GameInfo {
   odds: OddsInfo | null;
   injuries: InjuryInfo[];
   rest: RestInfo | null;
+  leaders: PlayerLeader[];
 }
 
 export const SPORT_PATHS: Record<string, { label: string; path: string }> = {
@@ -168,27 +182,177 @@ function parseTeam(comp: any): TeamInfo {
   };
 }
 
-export function parseOdds(raw: any): OddsInfo | null {
-  const o = Array.isArray(raw) ? raw[0] : raw;
+/** ESPN serves american odds as strings ("-110", "+154", "EVEN"). */
+function americanNum(v: unknown): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v !== "string") return null;
+  const s = v.trim().toUpperCase();
+  if (s === "EVEN" || s === "EV") return 100;
+  const n = parseInt(s.replace(/[^\d+-]/g, ""), 10);
+  return Number.isFinite(n) && n !== 0 ? n : null;
+}
+
+/** Walks the nested close/open price nodes DraftKings uses. */
+function priceOf(node: any): number | null {
+  if (!node) return null;
+  return (
+    americanNum(node?.close?.odds) ??
+    americanNum(node?.open?.odds) ??
+    americanNum(node?.current?.odds) ??
+    americanNum(node?.odds) ??
+    null
+  );
+}
+
+export function parseOdds(raw: any, homeAbbr?: string, awayAbbr?: string): OddsInfo | null {
+  const list: any[] = Array.isArray(raw) ? raw : raw ? [raw] : [];
+  // Prefer the entry that actually carries prices.
+  const o =
+    list.find((x) => x?.moneyline || x?.pointSpread || x?.total) ?? list[0];
   if (!o) return null;
-  let homeSpread: number | null = null;
-  const spread = typeof o.spread === "number" ? o.spread : null;
-  if (spread != null) {
-    if (o.homeTeamOdds?.favorite) homeSpread = -Math.abs(spread);
-    else if (o.awayTeamOdds?.favorite) homeSpread = Math.abs(spread);
+
+  // --- spread (ESPN's `spread` is already home-perspective) ---
+  let homeSpread: number | null =
+    typeof o.spread === "number" ? o.spread : null;
+  // Authoritative cross-check against the human-readable details string.
+  const det: string = typeof o.details === "string" ? o.details : "";
+  const m = det.match(/^([A-Z&.\-]{2,5})\s+([+-]?\d+(?:\.\d+)?)/);
+  if (m && homeAbbr && awayAbbr) {
+    const [, abbr, numStr] = m;
+    const num = parseFloat(numStr);
+    if (abbr === homeAbbr) homeSpread = num;
+    else if (abbr === awayAbbr) homeSpread = -num;
+  } else if (/^(EVEN|PK)/i.test(det) && homeSpread == null) {
+    homeSpread = 0;
   }
+
+  // --- moneyline: the modern payload nests these ---
+  const homeML =
+    priceOf(o.moneyline?.home) ?? americanNum(o.homeTeamOdds?.moneyLine);
+  const awayML =
+    priceOf(o.moneyline?.away) ?? americanNum(o.awayTeamOdds?.moneyLine);
+
+  // --- spread juice ---
+  const homeSpreadOdds =
+    priceOf(o.pointSpread?.home) ?? americanNum(o.homeTeamOdds?.spreadOdds);
+  const awaySpreadOdds =
+    priceOf(o.pointSpread?.away) ?? americanNum(o.awayTeamOdds?.spreadOdds);
+
+  // --- total + juice ---
+  const overUnder =
+    typeof o.overUnder === "number"
+      ? o.overUnder
+      : parseFloat(String(o.total?.over?.close?.line ?? "").replace(/[^\d.]/g, "")) ||
+        null;
+  const overOdds = priceOf(o.total?.over) ?? americanNum(o.overOdds);
+  const underOdds = priceOf(o.total?.under) ?? americanNum(o.underOdds);
+
+  // --- team totals: use book lines when present, else derive from the
+  // standard identity  TT = total/2 -/+ spread/2  (how books price them) ---
+  let homeTeamTotal: number | null = o.homeTeamOdds?.total ?? null;
+  let awayTeamTotal: number | null = o.awayTeamOdds?.total ?? null;
+  let teamTotalsDerived = false;
+  if ((homeTeamTotal == null || awayTeamTotal == null) && overUnder != null && homeSpread != null) {
+    const half = overUnder / 2;
+    homeTeamTotal = Math.round((half - homeSpread / 2) * 2) / 2;
+    awayTeamTotal = Math.round((half + homeSpread / 2) * 2) / 2;
+    teamTotalsDerived = true;
+  }
+
   return {
     provider: o.provider?.name ?? "ESPN BET",
-    details: o.details ?? "",
+    details: det,
     homeSpread,
-    homeML: o.homeTeamOdds?.moneyLine ?? null,
-    awayML: o.awayTeamOdds?.moneyLine ?? null,
-    overUnder: typeof o.overUnder === "number" ? o.overUnder : null,
-    overOdds: o.overOdds ?? null,
-    underOdds: o.underOdds ?? null,
-    homeTeamTotal: o.homeTeamOdds?.total ?? null,
-    awayTeamTotal: o.awayTeamOdds?.total ?? null,
+    homeSpreadOdds,
+    awaySpreadOdds,
+    homeML,
+    awayML,
+    overUnder,
+    overOdds,
+    underOdds,
+    homeTeamTotal,
+    awayTeamTotal,
+    teamTotalsDerived,
   };
+}
+
+// ---------- player leaders (free player-prop source) ----------
+
+const LEADER_STAT: Record<string, string> = {
+  passingyards: "PASS_YDS",
+  rushingyards: "RUSH_YDS",
+  receivingyards: "REC_YDS",
+  points: "PTS",
+  avgpoints: "PTS",
+  pointspergame: "PTS",
+  rebounds: "REB",
+  avgrebounds: "REB",
+  reboundspergame: "REB",
+  assists: "AST",
+  avgassists: "AST",
+  assistspergame: "AST",
+  goals: "GOALS",
+  shots: "SHOTS",
+};
+
+/** Plausible per-game ranges — guards against bad normalization. */
+const STAT_RANGE: Record<string, [number, number]> = {
+  PASS_YDS: [120, 400],
+  RUSH_YDS: [25, 165],
+  REC_YDS: [20, 140],
+  PTS: [8, 40],
+  REB: [3, 16],
+  AST: [2, 13],
+  GOALS: [0.2, 1.2],
+  SHOTS: [1, 6],
+};
+
+function gamesPlayed(record: string): number {
+  const m = record.match(/(\d+)[-–](\d+)(?:[-–](\d+))?/);
+  if (!m) return 0;
+  return Number(m[1]) + Number(m[2]) + Number(m[3] ?? 0);
+}
+
+export function parseLeaders(comp: any, home: TeamInfo, away: TeamInfo): PlayerLeader[] {
+  const out: PlayerLeader[] = [];
+  const gpByTeamId = new Map<string, number>([
+    [home.id, gamesPlayed(home.record)],
+    [away.id, gamesPlayed(away.record)],
+  ]);
+  const abbrByTeamId = new Map<string, string>([
+    [home.id, home.abbr],
+    [away.id, away.abbr],
+  ]);
+
+  for (const cat of comp?.leaders ?? []) {
+    const key = String(cat?.name ?? "").toLowerCase();
+    const stat = LEADER_STAT[key];
+    if (!stat) continue;
+    const isAverage = /avg|pergame/.test(key);
+    for (const L of cat?.leaders ?? []) {
+      const ath = L?.athlete;
+      if (!ath?.displayName) continue;
+      const teamId = String(ath?.team?.id ?? L?.team?.id ?? "");
+      const value = typeof L?.value === "number" ? L.value : null;
+      if (value == null) continue;
+      const gp = gpByTeamId.get(teamId) ?? 0;
+      let perGame: number | null = isAverage ? value : gp > 0 ? value / gp : null;
+      const range = STAT_RANGE[stat];
+      if (perGame != null && range && (perGame < range[0] || perGame > range[1])) {
+        perGame = null; // implausible → don't build a prop off it
+      }
+      out.push({
+        athlete: ath.displayName,
+        teamAbbr: abbrByTeamId.get(teamId) ?? "",
+        position: ath?.position?.abbreviation ?? "",
+        category: key,
+        stat,
+        seasonValue: value,
+        perGame: perGame != null ? Math.round(perGame * 10) / 10 : null,
+      });
+    }
+  }
+  return out;
 }
 
 function parseEvent(evt: any, sport: string): GameInfo {
@@ -214,9 +378,10 @@ function parseEvent(evt: any, sport: string): GameInfo {
     venue: comp.venue?.fullName ?? "",
     home,
     away,
-    odds: parseOdds(comp.odds),
+    odds: parseOdds(comp.odds, home.abbr, away.abbr),
     injuries: [],
     rest: null,
+    leaders: parseLeaders(comp, home, away),
   };
 }
 
@@ -407,7 +572,10 @@ export async function getSlateDetailed(
         const sum = await summary(g.sport, g.eventId);
         if (sum) {
           g.injuries = parseInjuries(sum);
-          if (!g.odds && sum.pickcenter) g.odds = parseOdds(sum.pickcenter);
+          if (!g.odds && sum.pickcenter)
+            g.odds = parseOdds(sum.pickcenter, g.home.abbr, g.away.abbr);
+          if (!g.leaders.length && sum.leaders)
+            g.leaders = parseLeaders({ leaders: sum.leaders }, g.home, g.away);
         }
         done++;
         return g;
@@ -441,6 +609,9 @@ export interface FinalScore {
   awayAbbr: string;
   homeScore: number;
   awayScore: number;
+  /** Per-period scoring: quarters / innings / periods, in order. */
+  homeLine: number[];
+  awayLine: number[];
 }
 
 export async function getFinals(
@@ -454,6 +625,10 @@ export async function getFinals(
     const home = cs.find((c) => c.homeAway === "home");
     const away = cs.find((c) => c.homeAway === "away");
     const st = evt?.status?.type ?? {};
+    const line = (c: any): number[] =>
+      (c?.linescores ?? [])
+        .map((l: any) => Number(l?.value ?? l?.displayValue ?? NaN))
+        .filter((n: number) => Number.isFinite(n));
     return {
       eventId: String(evt.id),
       status: st.state === "in" ? "in" : st.completed || st.state === "post" ? "post" : "pre",
@@ -461,6 +636,8 @@ export async function getFinals(
       awayAbbr: away?.team?.abbreviation ?? "?",
       homeScore: Number(home?.score ?? 0),
       awayScore: Number(away?.score ?? 0),
+      homeLine: line(home),
+      awayLine: line(away),
     };
   });
 }

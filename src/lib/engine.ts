@@ -247,12 +247,13 @@ function candidatesFor(g: GameInfo, nextId: () => number): {
       const team = homeSide ? g.home : g.away;
       const line = homeSide ? o.homeSpread : -o.homeSpread;
       const conf = Math.min(70, 54 + Math.min(13, Math.max(0, Math.abs(diff) - min) * 2.1) + jitter(g.eventId + "sp"));
+      const juice = (homeSide ? o.homeSpreadOdds : o.awaySpreadOdds) ?? -110;
       cands.push(
         mk(
           "spread",
           `${team.name} ${line > 0 ? "+" : ""}${Number(line.toFixed(1))}`,
           `spread ${line > 0 ? "+" : ""}${Number(line.toFixed(1))}`,
-          -110,
+          juice,
           Math.abs(diff),
           conf,
           `Model makes this ${fmtLine(model.margin)} for ${g.home.abbr}; market has ${fmtLine(
@@ -332,35 +333,214 @@ function candidatesFor(g: GameInfo, nextId: () => number): {
       );
     }
 
-    // team totals as game props when a big edge exists on the side
-    if (o.homeTeamTotal != null && model.margin - (o.homeSpread ?? 0) >= (EDGE_MIN[g.sport] ?? 2) + 1.5) {
+    // ---------------- derived markets ----------------
+    // Model projections for both sides, from the model margin + model total.
+    const modelTotal = o.overUnder + lean;
+    const modelHome = modelTotal / 2 + model.margin / 2;
+    const modelAway = modelTotal / 2 - model.margin / 2;
+
+    // --- team totals ---
+    for (const side of ["home", "away"] as const) {
+      const tt = side === "home" ? o.homeTeamTotal : o.awayTeamTotal;
+      const proj = side === "home" ? modelHome : modelAway;
+      const team = side === "home" ? g.home : g.away;
+      if (tt == null) continue;
+      const gap = proj - tt;
+      const need = (AVG_TOTAL[g.sport] ?? 40) <= 10 ? 0.45 : (AVG_TOTAL[g.sport] ?? 40) <= 50 ? 1.9 : 3.4;
+      if (Math.abs(gap) < need) continue;
+      const over = gap > 0;
       cands.push(
         mk(
           "team_total",
-          `${g.home.name} over ${o.homeTeamTotal} (team total)`,
-          `team total over ${o.homeTeamTotal}`,
+          `${team.name} team total ${over ? "over" : "under"} ${tt}`,
+          `${over ? "o" : "u"}${tt}`,
           -110,
-          model.margin - (o.homeSpread ?? 0),
-          Math.min(60, 53 + (model.margin - (o.homeSpread ?? 0)) * 1.1),
-          `${g.home.abbr} projects well above its posted team total on the model margin. ${edgeWhy(model, g, true)}`,
-          { side: "team_over", line: o.homeTeamTotal, teamAbbr: g.home.abbr },
+          Math.abs(gap),
+          Math.min(62, 53.5 + Math.min(8, Math.abs(gap) / need * 3.4) + jitter(g.eventId + side + "tt")),
+          `Model projects ${team.abbr} for ${proj.toFixed(1)} vs a ${o.teamTotalsDerived ? "derived" : "posted"} team total of ${tt}. ${edgeWhy(model, g, side === "home")}`,
+          { side: over ? "team_over" : "team_under", line: tt, teamAbbr: team.abbr },
+          ["MATCHUP"],
         ),
       );
     }
-    if (o.awayTeamTotal != null && (o.homeSpread ?? 0) - model.margin >= (EDGE_MIN[g.sport] ?? 2) + 1.5) {
-      cands.push(
-        mk(
-          "team_total",
-          `${g.away.name} over ${o.awayTeamTotal} (team total)`,
-          `team total over ${o.awayTeamTotal}`,
-          -110,
-          (o.homeSpread ?? 0) - model.margin,
-          Math.min(60, 53 + ((o.homeSpread ?? 0) - model.margin) * 1.1),
-          `${g.away.abbr} projects well above its posted team total on the model margin. ${edgeWhy(model, g, false)}`,
-          { side: "team_over", line: o.awayTeamTotal, teamAbbr: g.away.abbr },
-        ),
-      );
+
+    // --- first half / quarter / period derivatives ---
+    const isFootball = g.sport === "nfl" || g.sport === "ncaaf";
+    const isHoops = g.sport === "nba" || g.sport === "ncaab";
+    if (isFootball || isHoops) {
+      const tMul = isFootball ? 0.49 : 0.505; // 1H share of game total
+      const sMul = isFootball ? 0.55 : 0.52; // 1H share of game spread
+      const halfTotal = Math.round(o.overUnder * tMul * 2) / 2;
+      const halfLean = lean * tMul;
+      const halfNoise = isFootball ? 1.9 : 2.0;
+      if (Math.abs(halfLean) >= halfNoise) {
+        const over = halfLean > 0;
+        cands.push(
+          mk(
+            "1h_total",
+            `1st half ${over ? "over" : "under"} ${halfTotal} (${g.matchup})`,
+            `1H ${over ? "o" : "u"}${halfTotal}`,
+            -110,
+            Math.abs(halfLean),
+            Math.min(60, 53 + Math.min(6, Math.abs(halfLean)) + jitter(g.eventId + "1ht")),
+            `Full-game model leans ${over ? "over" : "under"} by ${Math.abs(lean).toFixed(1)}; scripts tend to show early, so the first-half number at ${halfTotal} carries the same edge at reduced variance.`,
+            { side: over ? "over" : "under", line: halfTotal, segment: "1H" },
+            ["MATCHUP", "CHRONO"],
+          ),
+        );
+      }
+      if (o.homeSpread != null) {
+        const halfSpread = Math.round(o.homeSpread * sMul * 2) / 2;
+        const halfMargin = model.margin * sMul;
+        const hDiff = halfMargin - halfSpread;
+        if (Math.abs(hDiff) >= (isFootball ? 1.6 : 1.5)) {
+          const homeSide = hDiff > 0;
+          const team = homeSide ? g.home : g.away;
+          const line = homeSide ? halfSpread : -halfSpread;
+          cands.push(
+            mk(
+              "1h_spread",
+              `${team.name} 1st half ${line > 0 ? "+" : ""}${line}`,
+              `1H ${line > 0 ? "+" : ""}${line}`,
+              -110,
+              Math.abs(hDiff),
+              Math.min(61, 53 + Math.min(7, Math.abs(hDiff) * 1.8) + jitter(g.eventId + "1hs")),
+              `${team.abbr} is the stronger early-script side: model half-margin ${halfMargin.toFixed(1)} vs a ${halfSpread > 0 ? "+" : ""}${halfSpread} first-half number. Avoids late garbage-time noise.`,
+              { side: homeSide ? "home" : "away", line, segment: "1H" },
+              ["MATCHUP"],
+            ),
+          );
+        }
+      }
+      // opening period total (NCAAB plays halves, so quarters don't apply)
+      if (g.sport !== "ncaab") {
+        const qMul = isFootball ? 0.235 : 0.253;
+        const qTotal = Math.round(o.overUnder * qMul * 2) / 2;
+        const qLean = lean * qMul;
+        if (Math.abs(qLean) >= (isFootball ? 1.0 : 1.2)) {
+          const over = qLean > 0;
+          cands.push(
+            mk(
+              "1q_total",
+              `1st quarter ${over ? "over" : "under"} ${qTotal} (${g.matchup})`,
+              `1Q ${over ? "o" : "u"}${qTotal}`,
+              -115,
+              Math.abs(qLean),
+              Math.min(58, 52.5 + Math.min(5, Math.abs(qLean) * 2.2) + jitter(g.eventId + "1qt")),
+              `Opening-frame derivative of the same ${over ? "over" : "under"} thesis, priced at ${qTotal}. Small stake — single-quarter variance is high.`,
+              { side: over ? "over" : "under", line: qTotal, segment: "1Q" },
+              ["MATCHUP"],
+            ),
+          );
+        }
+      }
     }
+
+    if (g.sport === "nhl") {
+      const p1Total = Math.round(o.overUnder * 0.315 * 2) / 2;
+      const p1Lean = lean * 0.315;
+      if (Math.abs(p1Lean) >= 0.22) {
+        const over = p1Lean > 0;
+        cands.push(
+          mk(
+            "p1_total",
+            `1st period ${over ? "over" : "under"} ${p1Total} (${g.matchup})`,
+            `P1 ${over ? "o" : "u"}${p1Total}`,
+            over ? 115 : -135,
+            Math.abs(p1Lean),
+            Math.min(58, 53 + Math.min(5, Math.abs(p1Lean) * 9) + jitter(g.eventId + "p1")),
+            `First-period derivative of the game total read. ${over ? "Both clubs open fast" : "Feeling-out period favors the under"} at ${p1Total}.`,
+            { side: over ? "over" : "under", line: p1Total, segment: "P1" },
+            ["MATCHUP"],
+          ),
+        );
+      }
+    }
+
+    if (g.sport === "mlb") {
+      // First five innings — the starters' market.
+      const f5Total = Math.round(o.overUnder * 0.55 * 2) / 2;
+      const f5Lean = lean * 0.55;
+      if (Math.abs(f5Lean) >= 0.28) {
+        const over = f5Lean > 0;
+        cands.push(
+          mk(
+            "f5_total",
+            `First 5 innings ${over ? "over" : "under"} ${f5Total} (${g.matchup})`,
+            `F5 ${over ? "o" : "u"}${f5Total}`,
+            -115,
+            Math.abs(f5Lean),
+            Math.min(60, 53 + Math.min(6, Math.abs(f5Lean) * 7) + jitter(g.eventId + "f5")),
+            `F5 removes bullpen variance and isolates the starters — the same ${over ? "over" : "under"} lean at ${f5Total}.`,
+            { side: over ? "over" : "under", line: f5Total, segment: "F5" },
+            ["MATCHUP"],
+          ),
+        );
+      }
+      // NRFI / YRFI via Poisson on first-inning run expectancy.
+      const perTeamInning = (o.overUnder / 2) / 9;
+      const lam1 = perTeamInning * 1.18; // top of the order bats first
+      const pNRFI = Math.exp(-2 * lam1);
+      if (pNRFI >= 0.54 || pNRFI <= 0.46) {
+        const nrfi = pNRFI >= 0.5;
+        cands.push(
+          mk(
+            nrfi ? "nrfi" : "nrfi",
+            nrfi ? `No Runs First Inning (${g.matchup})` : `Yes Runs First Inning (${g.matchup})`,
+            nrfi ? "NRFI" : "YRFI",
+            nrfi ? -125 : 105,
+            Math.abs(pNRFI - 0.5) * 100,
+            Math.min(60, 52.5 + Math.abs(pNRFI - 0.5) * 60 + jitter(g.eventId + "nrfi")),
+            `First-inning run expectancy models at ${(lam1 * 2).toFixed(2)} runs → ${(pNRFI * 100).toFixed(0)}% scoreless. Posted total of ${o.overUnder} supports the ${nrfi ? "NRFI" : "YRFI"} side.`,
+            { side: nrfi ? "under" : "over", line: 0.5, segment: "1I" },
+            ["MATCHUP"],
+          ),
+        );
+      }
+    }
+  }
+
+  // ---------------- player props from real season production ----------------
+  for (const L of g.leaders) {
+    if (L.perGame == null || !L.teamAbbr) continue;
+    const isHome = L.teamAbbr === g.home.abbr;
+    const spread = o?.homeSpread ?? 0;
+    // Game script: favorites run more, underdogs throw more.
+    const favMargin = isHome ? -spread : spread; // + means this team is favored
+    let adj = 0;
+    if (L.stat === "RUSH_YDS") adj = favMargin * 0.9;
+    else if (L.stat === "PASS_YDS") adj = -favMargin * 2.2;
+    else if (L.stat === "REC_YDS") adj = -favMargin * 0.7;
+    else if (L.stat === "PTS" || L.stat === "REB" || L.stat === "AST") {
+      // injury-driven usage consolidation
+      const outs = g.injuries.filter(
+        (i) => i.team === L.teamAbbr && /out|doubt/i.test(i.status),
+      ).length;
+      adj = outs * (L.stat === "PTS" ? 1.3 : 0.5);
+    }
+    const projection = L.perGame + adj;
+    const line = Math.round(L.perGame * 2) / 2; // market-shaped line at the season rate
+    const gap = projection - line;
+    const need =
+      L.stat === "PASS_YDS" ? 18 :
+      L.stat === "RUSH_YDS" ? 9 :
+      L.stat === "REC_YDS" ? 8 :
+      L.stat === "PTS" ? 1.6 : 0.9;
+    if (Math.abs(gap) < need) continue;
+    const over = gap > 0;
+    cands.push(
+      mk(
+        "player_prop",
+        `${L.athlete} ${over ? "over" : "under"} ${line} ${statLabel(L.stat)}`,
+        `${over ? "o" : "u"}${line}`,
+        -110,
+        Math.abs(gap),
+        Math.min(60, 53 + Math.min(6, (Math.abs(gap) / need) * 3) + jitter(g.eventId + L.athlete)),
+        `${L.athlete} (${L.teamAbbr}${L.position ? `, ${L.position}` : ""}) is producing ${L.perGame} ${statLabel(L.stat)} per game. Game script ${favMargin > 0 ? "as a favorite" : "as an underdog"} projects ${projection.toFixed(1)} — ${over ? "above" : "below"} the ${line} number.`,
+        { side: over ? "team_over" : "team_under", line, player: L.athlete, stat: L.stat, teamAbbr: L.teamAbbr },
+        ["PROPS", "MEDIC"],
+      ),
+    );
   }
 
   return { cands, model };
@@ -653,53 +833,79 @@ export async function runPipeline(runId: number): Promise<void> {
       mood: "info",
     });
 
-    // Two-phase card construction: the best 6 raw edges lock first, then the
-    // commissioner fills the remaining seats preferring untapped markets
-    // (diversity of angles beats stacking one side of one board).
+    // Card construction by MARKET FAMILY. A professional card is not eight
+    // spreads — it spans sides, totals, team props, player props and segment
+    // derivatives. Families get reserved chairs before raw edge fills the rest.
+    const familyOf = (cat: string): string =>
+      cat === "spread" || cat === "moneyline"
+        ? "side"
+        : cat === "total"
+          ? "game_total"
+          : cat === "team_total"
+            ? "team_prop"
+            : cat === "player_prop"
+              ? "player_prop"
+              : "segment_prop";
+    const FAMILY_CAP: Record<string, number> = {
+      side: 4, // sides never dominate the card
+      game_total: 2,
+      team_prop: 2,
+      player_prop: 3,
+      segment_prop: 3,
+    };
     const card: Candidate[] = [];
     const perGame = new Map<string, number>();
+    const perFamily = new Map<string, number>();
     let exposure = 0;
     const seat = (c: Candidate): number => {
       const cost = unitsFor(c);
+      const fam = familyOf(c.category);
       perGame.set(c.game.eventId, (perGame.get(c.game.eventId) ?? 0) + 1);
+      perFamily.set(fam, (perFamily.get(fam) ?? 0) + 1);
       c.finalUnits = cost;
       c.signals = [...new Set([...c.signals, "STRATEGA", "CONTRARIAN", "COMMISSIONER", "RISK", "HISTORIAN"])];
       card.push(c);
       exposure += cost;
       return cost;
     };
-    const eligible = (c: Candidate): boolean => {
+    const eligible = (c: Candidate, budget = 12.05): boolean => {
+      if (card.includes(c)) return false;
       if ((perGame.get(c.game.eventId) ?? 0) >= 2) return false;
-      return exposure + unitsFor(c) <= 12.05; // RISK veto on oversize
+      const fam = familyOf(c.category);
+      if ((perFamily.get(fam) ?? 0) >= (FAMILY_CAP[fam] ?? 3)) return false;
+      return exposure + unitsFor(c) <= budget; // RISK veto on oversize
     };
+
+    // Phase 1 — the four strongest raw edges anchor the card, but reserve
+    // roughly half the bankroll so alternate markets can still be seated.
     for (const c of live) {
-      if (card.length >= 6) break;
-      if (eligible(c)) seat(c);
+      if (card.length >= 4) break;
+      if (eligible(c, 7.5)) seat(c);
     }
-    const haveCats = new Set(card.map((c) => c.category));
-    const rest = live
-      .filter((c) => !card.includes(c))
-      .sort(
-        (a, b) =>
-          b.confidence + (haveCats.has(b.category) ? 0 : 5) -
-          (a.confidence + (haveCats.has(a.category) ? 0 : 5)),
-      );
-    // Reserved seats: the strongest alternate-market angles (totals, ML, props)
-    // earn chairs even over marginally higher-rated sides. Diversification is policy.
-    const altSeats = rest
-      .filter((c) => c.category !== "spread" && c.confidence >= 56)
-      .sort((a, b) => b.confidence - a.confidence);
-    let alts = 0;
-    for (const c of altSeats) {
-      if (alts >= 2 || card.length + 2 > 10) break;
-      if (eligible(c)) {
-        seat(c);
-        alts++;
+
+    // Phase 2 — one guaranteed chair for every market family with a live edge.
+    const families = ["game_total", "player_prop", "team_prop", "segment_prop", "side"];
+    for (const fam of families) {
+      if (card.length >= 10) break;
+      if ((perFamily.get(fam) ?? 0) > 0) continue;
+      // Walk the family's candidates until one clears game/budget limits —
+      // taking only the single best would forfeit the chair when its game
+      // is already double-booked.
+      const pool = live
+        .filter((c) => familyOf(c.category) === fam)
+        .sort((a, b) => b.confidence - a.confidence);
+      for (const c of pool) {
+        if (eligible(c)) {
+          seat(c);
+          break;
+        }
       }
     }
-    for (const c of rest) {
+
+    // Phase 3 — fill remaining chairs by edge, still honouring family caps.
+    for (const c of live) {
       if (card.length >= 10) break;
-      if (!card.includes(c) && eligible(c)) seat(c);
+      if (eligible(c)) seat(c);
     }
     card.sort((a, b) => b.confidence - a.confidence);
 
@@ -760,6 +966,10 @@ function statLabel(stat: string): string {
 
 const SCOUT_CODES = new Set(["QUANT", "MEDIC", "CHRONO", "MATCHUP", "SHARP", "PROPS"]);
 
+/** Derivatives carry more variance than sides — RISK sizes them down. */
+const REDUCED_SIZE = new Set(["total", "team_total", "player_prop", "1h_total", "1h_spread", "f5_total"]);
+const MIN_SIZE = new Set(["1q_total", "p1_total", "nrfi"]);
+
 function sealedUnits(c: { confidence: number; category: string; signals?: string[]; finalUnits?: number }): number {
   return c.finalUnits ?? unitsFor(c);
 }
@@ -770,9 +980,8 @@ export function unitsFor(c: { confidence: number; category: string; signals?: st
     c.confidence >= 68 && convergence >= 5 ? 2 :
     c.confidence >= 63 ? 1.5 :
     c.confidence >= 55 ? 1 : 0.5;
-  return c.category === "total" || c.category === "team_total" || c.category === "player_prop"
-    ? Math.max(0.5, u - 0.5)
-    : u;
+  if (MIN_SIZE.has(c.category)) return 0.5;
+  return REDUCED_SIZE.has(c.category) ? Math.max(0.5, u - 0.5) : u;
 }
 
 async function finishRun(runId: number, slateDate: string, decision: CouncilDecision, card: Candidate[]): Promise<void> {
@@ -859,6 +1068,49 @@ export async function gradePending(): Promise<{ graded: number; wins: number; lo
 
     const g = p.grade as GradeSpec;
     let outcome: "win" | "loss" | "push" | null = null;
+
+    // ---- segment (period/half/inning) markets settle off the linescore ----
+    const seg = g.segment ?? "FULL";
+    if (seg !== "FULL") {
+      const slice = (line: number[]): number | null => {
+        if (!line.length) return null;
+        if (seg === "1H") {
+          // NCAAB/soccer-style halves have 2 entries; quarter sports need Q1+Q2
+          return line.length <= 2 ? line[0] : line[0] + line[1];
+        }
+        if (seg === "1Q" || seg === "P1" || seg === "1I") return line[0];
+        if (seg === "F5") return line.slice(0, 5).reduce((s, n) => s + n, 0);
+        return null;
+      };
+      const h = slice(f.homeLine);
+      const a = slice(f.awayLine);
+      if (h == null || a == null) continue; // linescore not published yet
+      if (p.category === "1h_spread" && g.line != null) {
+        const diff = g.side === "home" ? h + g.line - a : a + g.line - h;
+        outcome = diff > 0 ? "win" : diff < 0 ? "loss" : "push";
+      } else if (p.category === "nrfi") {
+        const scored = h + a > 0;
+        // side "under" == NRFI (no runs), "over" == YRFI
+        outcome = (g.side === "under" && !scored) || (g.side === "over" && scored) ? "win" : "loss";
+      } else if (g.line != null) {
+        const tot = h + a;
+        outcome = tot === g.line ? "push" : (tot > g.line) === (g.side === "over") ? "win" : "loss";
+      }
+      if (outcome) {
+        const finalScore = `${f.awayAbbr} ${f.awayScore} — ${f.homeAbbr} ${f.homeScore} (${seg}: ${a}-${h})`;
+        await db
+          .update(predictions)
+          .set({ outcome, finalScore, gradedAt: new Date() })
+          .where(eq(predictions.id, p.id));
+        graded++;
+        if (outcome === "win") wins++;
+        else if (outcome === "loss") losses++;
+        else pushes++;
+        creditList.push({ agents: p.agents, outcome, confidence: p.confidence });
+      }
+      continue;
+    }
+
     if (p.category === "spread" && g.line != null) {
       const adjHome = f.homeScore + (g.side === "home" ? g.line : 0);
       const adjAway = f.awayScore + (g.side === "away" ? g.line : 0);
