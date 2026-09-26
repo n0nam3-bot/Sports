@@ -45,11 +45,30 @@ npx drizzle-kit push   # create tables
 npm run dev
 ```
 
-## Deploy notes
-- **Full stack** (recommended): Vercel / Render / any Node host with a Postgres URL.
-- **GitHub Pages** is static-only: API routes, the agent pipeline and Postgres cannot run there.
-  To mirror on Pages you would host this app elsewhere and publish a static build pointing at the
-  hosted API (`NEXT_PUBLIC_API_BASE`), or simply link to the hosted deployment from your Pages repo.
+## Deploy notes — access from any device
+
+**GitHub Pages cannot run this app** (it is static-only: no Node server, no Postgres, no API routes).
+Host the full app instead — every device then reaches it by URL.
+
+### Option A — Vercel + Neon (both free, ~10 min)
+1. Push the repo to GitHub, then [vercel.com/new](https://vercel.com/new) → **Import** the repo
+   (framework auto-detected: Next.js — leave all settings default).
+2. Create a free Postgres at [neon.tech](https://neon.tech) → copy the **pooled connection string**.
+3. Vercel → Project → Settings → Environment Variables → `DATABASE_URL` = your Neon string.
+4. From your laptop, create the tables once:
+   `DATABASE_URL="your-neon-url" npx drizzle-kit push` (or paste the schema via `drizzle-kit generate` SQL).
+5. Redeploy. Done — open the `*.vercel.app` URL on any phone/laptop.
+6. Optional: add `GEMINI_API_KEY` / `XAI_API_KEY` / `OPENROUTER_API_KEY` env vars to awaken the LLM swarm
+   (without keys it runs the built-in quant core). Free-tier functions are limited to 60s, so run
+   1–3 sports per card on hosted plans; heavy multi-league + LLM nights prefer a long-lived host.
+
+### Option B — Render (free web service + free Postgres)
+New Web Service → build `npm install && npm run build` → start `npm start` → add a Render Postgres
+and set `DATABASE_URL`. Long-lived server: full fire-and-forget pipeline + polling works.
+
+### Environment variables (all optional except the database)
+`DATABASE_URL` (required) · `GEMINI_API_KEY` (+`GEMINI_MODEL`) · `XAI_API_KEY` (+`GROK_MODEL`) ·
+`OPENROUTER_API_KEY` (+`OPENROUTER_MODEL`) · `OLLAMA_BASE_URL` (+`OLLAMA_MODEL`)
 
 ## Disclaimer
 For entertainment & research. No outcome is guaranteed. Never bet what you can't afford to lose.
