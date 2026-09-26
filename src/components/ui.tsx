@@ -119,10 +119,16 @@ export function NeonButton({
 
 const CATEGORY_META: Record<string, { label: string; tone: string }> = {
   spread: { label: "SPREAD", tone: "cyan" },
-  total: { label: "TOTAL", tone: "violet" },
+  total: { label: "GAME TOTAL", tone: "violet" },
   moneyline: { label: "MONEYLINE", tone: "green" },
-  team_total: { label: "TEAM TOTAL", tone: "amber" },
+  team_total: { label: "TEAM PROP", tone: "amber" },
   player_prop: { label: "PLAYER PROP", tone: "magenta" },
+  "1h_spread": { label: "1H SPREAD", tone: "cyan" },
+  "1h_total": { label: "1H TOTAL", tone: "violet" },
+  "1q_total": { label: "1Q TOTAL", tone: "violet" },
+  p1_total: { label: "1ST PERIOD", tone: "violet" },
+  f5_total: { label: "F5 INNINGS", tone: "amber" },
+  nrfi: { label: "NRFI / YRFI", tone: "magenta" },
 };
 
 export function CategoryChip({ category }: { category: string }) {
