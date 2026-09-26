@@ -1,6 +1,7 @@
 import { gradePending } from "@/lib/engine";
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 // Settles every pending prediction whose game has gone final,
 // then ripples rating changes + self-improvement through the roster.
