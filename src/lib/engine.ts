@@ -10,7 +10,7 @@ import {
 import { and, desc, eq, inArray, lt, ne } from "drizzle-orm";
 import {
   getFinals,
-  getSlate,
+  getSlateDetailed,
   lookupPlayerStat,
   type GameInfo,
 } from "./espn";
@@ -24,16 +24,25 @@ export const revalidate = 0;
 // slate cache (hot path shared by UI + pipeline)
 // ---------------------------------------------------------------------------
 
-const slateCache = new Map<string, { at: number; games: GameInfo[] }>();
+const slateCache = new Map<string, { at: number; games: GameInfo[]; degraded: string[] }>();
 const SLATE_TTL = 75_000;
 
-export async function cachedSlate(date: string, sports: string[]): Promise<GameInfo[]> {
+export async function cachedSlate(
+  date: string,
+  sports: string[],
+  opts: { budgetMs?: number; maxInjuryLookups?: number } = {},
+): Promise<{ games: GameInfo[]; degraded: string[] }> {
   const key = `${date}|${[...sports].sort().join(",")}`;
   const hit = slateCache.get(key);
-  if (hit && Date.now() - hit.at < SLATE_TTL) return hit.games;
-  const games = await getSlate(date, sports);
-  slateCache.set(key, { at: Date.now(), games });
-  return games;
+  if (hit && Date.now() - hit.at < SLATE_TTL) {
+    return { games: hit.games, degraded: hit.degraded };
+  }
+  const { games, degraded } = await getSlateDetailed(date, sports, {
+    budgetMs: opts.budgetMs ?? 12_000,
+    maxInjuryLookups: opts.maxInjuryLookups ?? 30,
+  });
+  slateCache.set(key, { at: Date.now(), games, degraded });
+  return { games, degraded };
 }
 
 // ---------------------------------------------------------------------------
@@ -420,7 +429,18 @@ export async function runPipeline(runId: number): Promise<void> {
       mood: "info",
     });
 
-    const games = await cachedSlate(run.slateDate, run.sports);
+    const { games, degraded } = await cachedSlate(run.slateDate, run.sports, {
+      budgetMs: 16_000,
+      maxInjuryLookups: 26,
+    });
+    if (degraded.length) {
+      await trace(runId, {
+        layer: "system",
+        agent: "KERNEL",
+        message: `intel note — ${degraded.join("; ")}. Agents proceed on available data.`,
+        mood: "warn",
+      });
+    }
     const pre = games.filter((g) => g.status === "pre");
     const skipped = games.length - pre.length;
 
