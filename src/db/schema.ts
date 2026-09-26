@@ -38,7 +38,16 @@ export type BetCategory =
   | "total"
   | "moneyline"
   | "team_total"
-  | "player_prop";
+  | "player_prop"
+  | "1h_spread"
+  | "1h_total"
+  | "1q_total"
+  | "p1_total"
+  | "f5_total"
+  | "nrfi";
+
+/** Which slice of the game a wager settles against. */
+export type Segment = "FULL" | "1H" | "1Q" | "P1" | "F5" | "1I";
 
 export interface GradeSpec {
   // resolved against the final score of eventId
@@ -47,6 +56,7 @@ export interface GradeSpec {
   teamAbbr?: string; // for team totals + player props
   player?: string; // player props
   stat?: string; // player prop stat key e.g. PTS, REB, AST, PASS_YDS
+  segment?: Segment; // defaults to FULL
 }
 
 export const agents = pgTable("agents", {
