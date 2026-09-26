@@ -5,6 +5,9 @@ import { desc, inArray } from "drizzle-orm";
 import { runPipeline } from "@/lib/engine";
 
 export const dynamic = "force-dynamic";
+// Serverless safety: background pipelines are killed on freeze, so on
+// function-based platforms we let the cluster finish inside the request.
+export const maxDuration = 60;
 
 export async function GET() {
   const list = await db.select().from(runs).orderBy(desc(runs.id)).limit(40);
@@ -36,7 +39,12 @@ export async function POST(req: NextRequest) {
     .insert(runs)
     .values({ slateDate: body.date, sports: body.sports.slice(0, 6), status: "running" })
     .returning();
-  // fire-and-forget: the client polls /api/runs/[id] for the live trace
-  void runPipeline(run.id).catch(() => {});
+  if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME) {
+    // function hosts freeze after the response — run the cluster inline
+    await runPipeline(run.id);
+  } else {
+    // long-lived Node hosts: fire-and-forget, client polls the live trace
+    void runPipeline(run.id).catch(() => {});
+  }
   return Response.json({ id: run.id });
 }
