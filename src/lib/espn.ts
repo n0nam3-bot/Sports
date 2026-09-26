@@ -72,21 +72,69 @@ export const SPORT_PATHS: Record<string, { label: string; path: string }> = {
 
 const API = "https://site.api.espn.com/apis/site/v2/sports";
 
-async function jfetch(url: string, timeoutMs = 12000): Promise<any | null> {
-  try {
-    const ctl = new AbortController();
-    const t = setTimeout(() => ctl.abort(), timeoutMs);
-    const res = await fetch(url, {
-      signal: ctl.signal,
-      headers: { "user-agent": "neonslip-agent/1.0" },
-      cache: "no-store",
-    });
-    clearTimeout(t);
-    if (!res.ok) return null;
-    return await res.json();
-  } catch {
-    return null;
+export interface FetchDiag {
+  lastUrl: string;
+  lastStatus: number | string;
+  lastAgent: string;
+  attempts: number;
+  failures: number;
+}
+
+export const fetchDiag: FetchDiag = {
+  lastUrl: "",
+  lastStatus: "-",
+  lastAgent: "-",
+  attempts: 0,
+  failures: 0,
+};
+
+// ESPN's edge (Akamai) 403s full browser user-agents that lack matching
+// browser fingerprints, but happily serves plain API clients. Order matters:
+// the simple agent is the known-good default, the others are fallbacks in
+// case a particular host/IP range gets filtered.
+const UA_VARIANTS = [
+  "neonslip-agent/1.0",
+  "okhttp/4.12.0",
+  "curl/8.4.0",
+];
+let uaIndex = 0;
+
+async function jfetch(url: string, timeoutMs = 8000, retries = 2): Promise<any | null> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    fetchDiag.attempts++;
+    fetchDiag.lastUrl = url;
+    const ua = UA_VARIANTS[(uaIndex + attempt) % UA_VARIANTS.length];
+    try {
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(), timeoutMs);
+      const res = await fetch(url, {
+        signal: ctl.signal,
+        headers: { "user-agent": ua, accept: "application/json" },
+        cache: "no-store",
+      });
+      clearTimeout(t);
+      fetchDiag.lastStatus = res.status;
+      fetchDiag.lastAgent = ua;
+      if (!res.ok) {
+        // 403/429 => this agent is filtered here; pin the next one and retry.
+        if ((res.status === 403 || res.status === 429) && attempt < retries) {
+          uaIndex = (uaIndex + attempt + 1) % UA_VARIANTS.length;
+          continue;
+        }
+        if (res.status >= 500 && attempt < retries) continue;
+        fetchDiag.failures++;
+        return null;
+      }
+      return await res.json();
+    } catch (e) {
+      fetchDiag.lastStatus = e instanceof Error ? e.name : "error";
+      if (attempt >= retries) {
+        fetchDiag.failures++;
+        return null;
+      }
+    }
   }
+  return null;
 }
 
 function toYyyymmdd(dateISO: string): string {
@@ -193,9 +241,11 @@ async function teamDaysBack(
   dateISO: string,
   back: number,
 ): Promise<TeamDay[]> {
-  const out: TeamDay[] = [];
-  for (let i = 1; i <= back; i++) {
-    const events = await scoreboard(sport, addDays(dateISO, -i));
+  // Parallel: 3 sequential round-trips per sport was the main latency sink.
+  const days = await Promise.all(
+    Array.from({ length: back }, (_, i) => scoreboard(sport, addDays(dateISO, -(i + 1)))),
+  );
+  return days.map((events) => {
     const abbrs = new Set<string>();
     const homeAbbrs = new Set<string>();
     for (const evt of events) {
@@ -204,9 +254,8 @@ async function teamDaysBack(
       abbrs.add(g.away.abbr);
       homeAbbrs.add(g.home.abbr);
     }
-    out.push({ abbrs, homeAbbrs });
-  }
-  return out;
+    return { abbrs, homeAbbrs };
+  });
 }
 
 export function computeRest(homeAbbr: string, awayAbbr: string, days: TeamDay[]): RestInfo {
@@ -280,39 +329,107 @@ async function mapLimit<T, R>(
   return results;
 }
 
-export async function getSlate(dateISO: string, sports: string[]): Promise<GameInfo[]> {
-  const perSport = await Promise.all(
-    sports.map(async (sport) => {
-      const [events, days] = await Promise.all([
-        scoreboard(sport, dateISO),
-        teamDaysBack(sport, dateISO, 3),
-      ]);
-      const games = events.map((evt) => parseEvent(evt, sport));
-      for (const g of games) {
-        g.rest = computeRest(g.home.abbr, g.away.abbr, days);
-      }
-      // Injuries only matter for upcoming analysis; enrich pre-games.
-      await mapLimit(
-        games.filter((g) => g.status !== "post"),
-        6,
-        async (g) => {
-          const sum = await summary(sport, g.eventId);
-          if (sum) {
-            g.injuries = parseInjuries(sum);
-            if (!g.odds && sum.pickcenter) g.odds = parseOdds(sum.pickcenter);
-          }
-          return g;
-        },
-      );
-      return games;
-    }),
+export interface SlateOptions {
+  /** Wall-clock budget for the whole fetch. Enrichment degrades gracefully. */
+  budgetMs?: number;
+  /** Pull prior-3-day schedules to derive rest/B2B intel. */
+  withRest?: boolean;
+  /** Pull per-game injury reports (1 request per game — the expensive part). */
+  withInjuries?: boolean;
+  /** Hard cap on injury lookups regardless of remaining budget. */
+  maxInjuryLookups?: number;
+}
+
+export interface SlateResult {
+  games: GameInfo[];
+  degraded: string[];
+  elapsedMs: number;
+}
+
+/**
+ * Slate loader built for serverless time limits.
+ * The scoreboard (the only mandatory call) resolves first, so games ALWAYS
+ * render; rest and injury intel are layered on only while budget remains.
+ */
+export async function getSlateDetailed(
+  dateISO: string,
+  sports: string[],
+  opts: SlateOptions = {},
+): Promise<SlateResult> {
+  const started = Date.now();
+  const budgetMs = opts.budgetMs ?? 9000;
+  const withRest = opts.withRest ?? true;
+  const withInjuries = opts.withInjuries ?? true;
+  const maxInjury = opts.maxInjuryLookups ?? 30;
+  const degraded: string[] = [];
+  const left = () => budgetMs - (Date.now() - started);
+
+  // ---- Stage 1 (mandatory): scoreboards, all sports in parallel ----
+  const boards = await Promise.all(
+    sports.map(async (sport) => ({
+      sport,
+      games: (await scoreboard(sport, dateISO)).map((evt) => parseEvent(evt, sport)),
+    })),
   );
-  return perSport
-    .flat()
-    .sort(
-      (a, b) =>
-        new Date(a.startTime || 0).getTime() - new Date(b.startTime || 0).getTime(),
-    );
+  const games = boards.flatMap((b) => b.games);
+
+  // ---- Stage 2 (optional): rest intelligence ----
+  if (withRest && left() > 2500) {
+    try {
+      const restBySport = await Promise.all(
+        boards.map(async (b) => ({
+          sport: b.sport,
+          days: await teamDaysBack(b.sport, dateISO, 3),
+        })),
+      );
+      const map = new Map(restBySport.map((r) => [r.sport, r.days]));
+      for (const g of games) {
+        const days = map.get(g.sport);
+        if (days) g.rest = computeRest(g.home.abbr, g.away.abbr, days);
+      }
+    } catch {
+      degraded.push("rest intel unavailable");
+    }
+  } else if (withRest) {
+    degraded.push("rest intel skipped (time budget)");
+  }
+
+  // ---- Stage 3 (optional): injuries, budget-aware ----
+  if (withInjuries) {
+    const targets = games
+      .filter((g) => g.status === "pre")
+      .sort((a, b) => new Date(a.startTime || 0).getTime() - new Date(b.startTime || 0).getTime())
+      .slice(0, maxInjury);
+    let done = 0;
+    if (targets.length && left() > 2000) {
+      await mapLimit(targets, 8, async (g) => {
+        if (left() < 1200) return g; // stop enriching, keep what we have
+        const sum = await summary(g.sport, g.eventId);
+        if (sum) {
+          g.injuries = parseInjuries(sum);
+          if (!g.odds && sum.pickcenter) g.odds = parseOdds(sum.pickcenter);
+        }
+        done++;
+        return g;
+      });
+    }
+    if (done < targets.length) {
+      degraded.push(`injury reports partial (${done}/${targets.length})`);
+    }
+  }
+
+  games.sort(
+    (a, b) => new Date(a.startTime || 0).getTime() - new Date(b.startTime || 0).getTime(),
+  );
+  return { games, degraded, elapsedMs: Date.now() - started };
+}
+
+export async function getSlate(
+  dateISO: string,
+  sports: string[],
+  opts: SlateOptions = {},
+): Promise<GameInfo[]> {
+  return (await getSlateDetailed(dateISO, sports, opts)).games;
 }
 
 // ---------- finals for grading ----------
