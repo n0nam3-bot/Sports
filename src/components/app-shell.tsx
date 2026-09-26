@@ -29,6 +29,7 @@ export default function AppShell() {
   const [sports, setSports] = useState<string[]>(["nba"]);
   const [slate, setSlate] = useState<SlateResp | null>(null);
   const [slateLoading, setSlateLoading] = useState(false);
+  const [slateError, setSlateError] = useState<string | null>(null);
   const [agentsData, setAgentsData] = useState<AgentC[]>([]);
   const [runsData, setRunsData] = useState<RunC[]>([]);
   const [activeId, setActiveId] = useState<number | null>(null);
@@ -59,10 +60,21 @@ export default function AppShell() {
 
   const loadSlate = useCallback(async () => {
     setSlateLoading(true);
+    setSlateError(null);
     try {
       const res = await fetch(`/api/slate?date=${date}&sports=${sports.join(",")}`);
       const data = await res.json();
-      if (!data.error) setSlate(data);
+      if (data.error) {
+        setSlateError(`${data.error}${data.hint ? ` — ${data.hint}` : ""}`);
+        setSlate(null);
+      } else {
+        setSlate(data);
+      }
+    } catch {
+      setSlateError(
+        "The slate request timed out or was blocked. On free hosting tiers try one sport at a time, then retry.",
+      );
+      setSlate(null);
     } finally {
       setSlateLoading(false);
     }
@@ -258,6 +270,7 @@ export default function AppShell() {
             toggleSport={toggleSport}
             slate={slate}
             slateLoading={slateLoading}
+            slateError={slateError}
             reloadSlate={loadSlate}
             launch={launch}
             running={!!running}

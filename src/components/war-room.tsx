@@ -41,6 +41,7 @@ export default function WarRoom(props: {
   toggleSport: (id: string) => void;
   slate: SlateResp | null;
   slateLoading: boolean;
+  slateError?: string | null;
   reloadSlate: () => void;
   launch: () => void;
   running: boolean;
@@ -120,6 +121,26 @@ export default function WarRoom(props: {
             </NeonButton>
           </div>
         </div>
+
+        {props.slateError && (
+          <div className="mt-4 flex items-start gap-2.5 border border-[#ff4757]/30 bg-[#ff4757]/8 px-3.5 py-3">
+            <XOctagon className="mt-0.5 h-4 w-4 shrink-0 text-[#ff4757]" />
+            <div className="font-mono text-[10.5px] uppercase leading-relaxed tracking-[0.12em] text-[#ff8296]">
+              slate fetch failed — {props.slateError}
+              <div className="mt-1 text-[#8fa3bd] normal-case tracking-normal">
+                Run the self-test at <span className="text-[#39d5ff]">/api/diag</span> to see whether the
+                database, the sports feed, or the host is at fault.
+              </div>
+            </div>
+          </div>
+        )}
+
+        {slate && slate.degraded && slate.degraded.length > 0 && (
+          <div className="mt-4 flex items-center gap-2 border border-[#ffb020]/25 bg-[#ffb020]/8 px-3.5 py-2 font-mono text-[10px] uppercase tracking-[0.14em] text-[#ffc966]">
+            <Gauge className="h-3.5 w-3.5 shrink-0" />
+            partial intel: {slate.degraded.join(" · ")} — agents still run on everything available
+          </div>
+        )}
 
         {/* slate vitals */}
         <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-2 border-t border-white/6 pt-3.5 font-mono text-[10px] uppercase tracking-[0.16em] text-[#5f7089]">
@@ -258,7 +279,14 @@ export default function WarRoom(props: {
           <Panel className="p-8 text-center">
             <XOctagon className="mx-auto mb-2 h-6 w-6 text-[#ffb020]" />
             <div className="font-mono text-[12px] uppercase tracking-[0.2em] text-[#8fa3bd]">
-              no games found on this slate — off-day or off-season. pick another date/sport.
+              no games scheduled for {props.date} in {props.sports.map((s) => s.toUpperCase()).join(" / ")}
+            </div>
+            <div className="mx-auto mt-3 max-w-xl text-[12px] leading-relaxed text-[#5f7089]">
+              This is the league&apos;s calendar, not an error — off-day or off-season. Leagues run:
+              <span className="text-[#39d5ff]"> NFL/NCAAF</span> Sep–Jan ·
+              <span className="text-[#9d7bff]"> NBA/NCAAB/NHL</span> Oct–Jun ·
+              <span className="text-[#ffb020]"> MLB</span> Mar–Oct. Try tomorrow&apos;s date, or select
+              several sports at once to find a live board.
             </div>
           </Panel>
         )}

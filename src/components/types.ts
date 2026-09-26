@@ -22,6 +22,7 @@ export interface GameC {
 }
 export interface SlateResp {
   date: string; sports: string[]; games: GameC[]; providers: string[];
+  degraded?: string[];
   counts: { total: number; pre: number; live: number; final: number };
 }
 
