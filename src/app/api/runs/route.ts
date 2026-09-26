@@ -3,6 +3,7 @@ import { db } from "@/db";
 import { predictions, runs } from "@/db/schema";
 import { desc, inArray } from "drizzle-orm";
 import { runPipeline } from "@/lib/engine";
+import { ensureSchema } from "@/lib/schema";
 
 export const dynamic = "force-dynamic";
 // Serverless safety: background pipelines are killed on freeze, so on
@@ -10,6 +11,7 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 export async function GET() {
+  await ensureSchema();
   const list = await db.select().from(runs).orderBy(desc(runs.id)).limit(40);
   const ids = list.map((r) => r.id);
   const preds = ids.length
@@ -35,6 +37,7 @@ export async function POST(req: NextRequest) {
   if (!body?.date || !/^\d{4}-\d{2}-\d{2}$/.test(body.date) || !body.sports?.length) {
     return Response.json({ error: "date + sports required" }, { status: 400 });
   }
+  await ensureSchema();
   const [run] = await db
     .insert(runs)
     .values({ slateDate: body.date, sports: body.sports.slice(0, 6), status: "running" })
