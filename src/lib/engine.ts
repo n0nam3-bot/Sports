@@ -16,6 +16,7 @@ import {
 } from "./espn";
 import { llmJson, targetFor } from "./llm";
 import { ensureAgentsSeeded, settleAgentRatings } from "./agents";
+import { ensureSchema } from "./schema";
 
 export const revalidate = 0;
 
@@ -815,6 +816,7 @@ async function buildLessons(): Promise<string[]> {
 // ---------------------------------------------------------------------------
 
 export async function gradePending(): Promise<{ graded: number; wins: number; losses: number; pushes: number }> {
+  await ensureSchema();
   const pending = await db
     .select()
     .from(predictions)

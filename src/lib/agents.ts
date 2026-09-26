@@ -2,6 +2,7 @@ import { db } from "@/db";
 import { agents, type AgentRow, type ImprovementEntry } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { targetFor } from "./llm";
+import { ensureSchema } from "./schema";
 
 export interface AgentDef {
   id: string;
@@ -169,6 +170,7 @@ trim the weakest bets down. Conflicting-scout games never exceed 1u. Capital pre
 export const DEFAULT_AGENT_ORDER = AGENT_DEFS.map((d) => d.id);
 
 export async function ensureAgentsSeeded(): Promise<void> {
+  await ensureSchema();
   const existing = await db.select({ id: agents.id }).from(agents);
   if (existing.length >= AGENT_DEFS.length) return;
   const have = new Set(existing.map((r) => r.id));
