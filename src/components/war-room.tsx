@@ -151,7 +151,9 @@ export default function WarRoom(props: {
           <span className="flex items-center gap-1.5"><Lock className="h-3 w-3 text-[#ffb020]" />
             {slate ? `${slate.counts.final} final — auto-skipped` : "—"}</span>
           <span className="flex items-center gap-1.5"><Cpu className="h-3 w-3 text-[#37ff8b]" />
-            {slate && slate.providers.length ? `swarm: ${slate.providers.join(" ・ ")}` : "swarm: heuristic quant core (add GEMINI_API_KEY / XAI_API_KEY / OPENROUTER_API_KEY / OLLAMA_BASE_URL to awaken the LLMs)"}
+            {slate && slate.providers.length
+              ? `swarm: ${slate.providers.join(" ・ ")}`
+              : "swarm: built-in quant core — free, no keys needed. tap ADD AI KEYS up top to plug in your own gemini / grok / openrouter / ollama."}
           </span>
         </div>
       </Panel>

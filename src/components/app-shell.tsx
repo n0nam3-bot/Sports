@@ -2,10 +2,12 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Crosshair, Hexagon, Layers, Users, ScrollText, Zap, Radio, Cpu,
+  Crosshair, Hexagon, Layers, Users, ScrollText, Zap, Radio, Cpu, KeyRound,
 } from "lucide-react";
 import type { AgentC, RunC, SlateResp } from "./types";
 import { cx } from "./ui";
+import KeysModal from "./keys-modal";
+import { loadVault, vaultActive, vaultFetch, EMPTY_VAULT, type KeyVault } from "./keys";
 import WarRoom from "./war-room";
 import AgentsView from "./agents-view";
 import RunsView from "./runs-view";
@@ -37,8 +39,15 @@ export default function AppShell() {
   const [toast, setToast] = useState<string | null>(null);
   const [launching, setLaunching] = useState(false);
   const [clock, setClock] = useState("");
+  const [vault, setVault] = useState<KeyVault>(EMPTY_VAULT);
+  const [keysOpen, setKeysOpen] = useState(false);
   const activeIdRef = useRef<number | null>(null);
   activeIdRef.current = activeId;
+
+  // hydrate the visitor's own key vault from localStorage
+  useEffect(() => {
+    setVault(loadVault());
+  }, []);
 
   // live ET clock
   useEffect(() => {
@@ -62,7 +71,7 @@ export default function AppShell() {
     setSlateLoading(true);
     setSlateError(null);
     try {
-      const res = await fetch(`/api/slate?date=${date}&sports=${sports.join(",")}`);
+      const res = await vaultFetch(`/api/slate?date=${date}&sports=${sports.join(",")}`, {}, vault);
       const data = await res.json();
       if (data.error) {
         setSlateError(`${data.error}${data.hint ? ` — ${data.hint}` : ""}`);
@@ -78,7 +87,7 @@ export default function AppShell() {
     } finally {
       setSlateLoading(false);
     }
-  }, [date, sports]);
+  }, [date, sports, vault]);
 
   const loadRuns = useCallback(async () => {
     const res = await fetch("/api/runs");
@@ -87,10 +96,10 @@ export default function AppShell() {
   }, []);
 
   const loadAgents = useCallback(async () => {
-    const res = await fetch("/api/agents");
+    const res = await vaultFetch("/api/agents", {}, vault);
     const data = await res.json();
     setAgentsData(data.agents ?? []);
-  }, []);
+  }, [vault]);
 
   useEffect(() => { void loadSlate(); }, [loadSlate]);
   useEffect(() => { void loadRuns(); void loadAgents(); }, [loadRuns, loadAgents]);
@@ -114,11 +123,15 @@ export default function AppShell() {
   const launch = useCallback(async () => {
     setLaunching(true);
     try {
-      const res = await fetch("/api/runs", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ date, sports }),
-      });
+      const res = await vaultFetch(
+        "/api/runs",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ date, sports }),
+        },
+        vault,
+      );
       const data = await res.json();
       if (data.id) {
         setActiveId(data.id);
@@ -129,7 +142,7 @@ export default function AppShell() {
     } finally {
       setLaunching(false);
     }
-  }, [date, sports, flash]);
+  }, [date, sports, flash, vault]);
 
   const grade = useCallback(async () => {
     const res = await fetch("/api/grade", { method: "POST" });
@@ -190,7 +203,20 @@ export default function AppShell() {
             ))}
           </div>
 
-          <div className="ml-auto flex items-center gap-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[#5f7089]">
+          <div className="ml-auto flex items-center gap-3 font-mono text-[11px] uppercase tracking-[0.14em] text-[#5f7089]">
+            <button
+              onClick={() => setKeysOpen(true)}
+              className={cx(
+                "clip-tag flex items-center gap-1.5 border px-3 py-1.5 font-mono text-[10px] font-bold uppercase tracking-[0.16em] transition-all",
+                vaultActive(vault)
+                  ? "border-[#37ff8b]/40 bg-[#37ff8b]/10 text-[#37ff8b] shadow-[0_0_14px_-4px_rgba(55,255,139,0.5)]"
+                  : "border-white/15 bg-white/[0.03] text-[#5f7089] hover:border-[#39d5ff]/40 hover:text-[#39d5ff]",
+              )}
+              title="Add your own free AI keys (optional)"
+            >
+              <KeyRound className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">{vaultActive(vault) ? "your ai: on" : "add ai keys"}</span>
+            </button>
             <span className="hidden sm:inline-flex items-center gap-1.5">
               <Radio className="h-3.5 w-3.5 text-[#ff3d81]" /> ET {clock}
             </span>
@@ -248,6 +274,19 @@ export default function AppShell() {
             ))}
           </div>
         </div>
+      )}
+
+      {keysOpen && (
+        <KeysModal
+          vault={vault}
+          setVault={setVault}
+          onClose={() => setKeysOpen(false)}
+          onSaved={() => {
+            flash("key vault saved to this device — agents rerouted to your models");
+            void loadAgents();
+            void loadSlate();
+          }}
+        />
       )}
 
       {/* ---------------- toast ---------------- */}
