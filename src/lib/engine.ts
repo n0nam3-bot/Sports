@@ -7,7 +7,7 @@ import {
   type GradeSpec,
   type TraceEntry,
 } from "@/db/schema";
-import { and, desc, eq, inArray, lt, ne } from "drizzle-orm";
+import { and, desc, eq, inArray, lt, ne, sql as dsql } from "drizzle-orm";
 import {
   getFinals,
   getSlateDetailed,
@@ -17,6 +17,7 @@ import {
 import { llmJson, targetFor, type KeyBag } from "./llm";
 import { ensureAgentsSeeded, settleAgentRatings } from "./agents";
 import { ensureSchema } from "./schema";
+import { HOUSE } from "./owner";
 
 export const revalidate = 0;
 
@@ -593,12 +594,12 @@ async function trace(runId: number, entry: Omit<TraceEntry, "at">): Promise<void
   await db.update(runs).set({ trace: next }).where(eq(runs.id, runId));
 }
 
-export async function runPipeline(runId: number, keys: KeyBag = {}): Promise<void> {
+export async function runPipeline(runId: number, keys: KeyBag = {}, ownerId: string = HOUSE): Promise<void> {
   const [run] = await db.select().from(runs).where(eq(runs.id, runId));
   if (!run) return;
-  await ensureAgentsSeeded();
-  const roster = await db.select().from(agents);
-  const agent = (key: string) => roster.find((a) => a.codename === key || a.id === key);
+  await ensureAgentsSeeded(ownerId);
+  const roster = await db.select().from(agents).where(eq(agents.ownerId, ownerId));
+  const agent = (key: string) => roster.find((a) => a.codename === key || a.agentKey === key);
   const nowMode = targetFor("scout-quant", keys) ? "llm" : "heuristic";
 
   try {
@@ -642,7 +643,7 @@ export async function runPipeline(runId: number, keys: KeyBag = {}): Promise<voi
         message: "No upcoming games on this slate. Standing down.",
         mood: "warn",
       });
-      await finishRun(runId, run.slateDate, { headline: "No active slate", memo: "Every game on the board was already live or final. Pick another date.", avoided: [] }, []);
+      await finishRun(runId, ownerId, run.slateDate, { headline: "No active slate", memo: "Every game on the board was already live or final. Pick another date.", avoided: [] }, []);
       return;
     }
 
@@ -735,7 +736,7 @@ export async function runPipeline(runId: number, keys: KeyBag = {}): Promise<voi
         message: "Zero model-vs-market gaps cleared the edge threshold. This board is priced efficiently — no card tonight.",
         mood: "warn",
       });
-      await finishRun(runId, run.slateDate, { headline: "Clean board, no edges", memo: "The market priced this slate efficiently. Discipline: no forced bets.", avoided: pre.map((g) => g.matchup).slice(0, 10) }, []);
+      await finishRun(runId, ownerId, run.slateDate, { headline: "Clean board, no edges", memo: "The market priced this slate efficiently. Discipline: no forced bets.", avoided: pre.map((g) => g.matchup).slice(0, 10) }, []);
       return;
     }
 
@@ -823,7 +824,7 @@ export async function runPipeline(runId: number, keys: KeyBag = {}): Promise<voi
     const live = allCandidates.filter((c) => !c.vetoed).sort((a, b) => b.confidence - a.confidence);
 
     // ---------------- Layer 3: council ----------------
-    const lessons = await buildLessons();
+    const lessons = await buildLessons(ownerId);
     await trace(runId, {
       layer: "council",
       agent: "HISTORIAN",
@@ -940,7 +941,7 @@ export async function runPipeline(runId: number, keys: KeyBag = {}): Promise<voi
       mood: "info",
     });
 
-    await finishRun(runId, run.slateDate, decision, card);
+    await finishRun(runId, ownerId, run.slateDate, decision, card);
   } catch (err) {
     await trace(runId, {
       layer: "system",
@@ -984,41 +985,106 @@ export function unitsFor(c: { confidence: number; category: string; signals?: st
   return REDUCED_SIZE.has(c.category) ? Math.max(0.5, u - 0.5) : u;
 }
 
-async function finishRun(runId: number, slateDate: string, decision: CouncilDecision, card: Candidate[]): Promise<void> {
-  for (let i = 0; i < card.length; i++) {
-    const c = card[i];
-    await db.insert(predictions).values({
-      runId,
-      sortOrder: i,
-      slateDate,
-      sport: c.game.sport,
-      eventId: c.game.eventId,
-      matchup: c.game.matchup,
-      startTime: c.game.startTime ? new Date(c.game.startTime) : null,
-      category: c.category,
-      pick: c.pick,
-      lineLabel: c.lineLabel,
-      odds: c.odds,
-      units: sealedUnits(c),
-      confidence: Math.round(c.confidence * 10) / 10,
-      edge: Math.round(c.edge * 10) / 10,
-      agents: c.signals,
-      reasoning: c.thesis,
-      grade: c.grade,
-      outcome: "pending",
-    });
+async function finishRun(runId: number, ownerId: string, slateDate: string, decision: CouncilDecision, card: Candidate[]): Promise<void> {
+  const repeats: NonNullable<CouncilDecision["repeats"]> = [];
+  let released = 0;
+
+  for (const c of card) {
+    const key = dedupeKeyFor(slateDate, c);
+    // Same wager identity already on this workspace's ledger? Acknowledge it
+    // instead of inserting a clone — a duplicate row would settle a second
+    // time and silently double-count the win or loss.
+    const [existing] = await db
+      .select({
+        id: predictions.id,
+        runId: predictions.runId,
+        outcome: predictions.outcome,
+      })
+      .from(predictions)
+      .where(and(eq(predictions.ownerId, ownerId), eq(predictions.dedupeKey, key)))
+      .limit(1);
+
+    if (existing) {
+      repeats.push({
+        pick: c.pick,
+        matchup: c.game.matchup,
+        firstRunId: existing.runId,
+        outcome: existing.outcome,
+      });
+      continue;
+    }
+
+    const inserted = await db
+      .insert(predictions)
+      .values({
+        ownerId,
+        dedupeKey: key,
+        runId,
+        sortOrder: released,
+        slateDate,
+        sport: c.game.sport,
+        eventId: c.game.eventId,
+        matchup: c.game.matchup,
+        startTime: c.game.startTime ? new Date(c.game.startTime) : null,
+        category: c.category,
+        pick: c.pick,
+        lineLabel: c.lineLabel,
+        odds: c.odds,
+        units: sealedUnits(c),
+        confidence: Math.round(c.confidence * 10) / 10,
+        edge: Math.round(c.edge * 10) / 10,
+        agents: c.signals,
+        reasoning: c.thesis,
+        grade: c.grade,
+        outcome: "pending",
+      })
+      // belt & braces: the unique index also blocks a race between two runs
+      .onConflictDoNothing()
+      .returning({ id: predictions.id });
+    if (inserted.length) released++;
+    else
+      repeats.push({
+        pick: c.pick,
+        matchup: c.game.matchup,
+        firstRunId: runId,
+        outcome: "pending",
+      });
   }
+
+  const finalDecision: CouncilDecision = { ...decision, repeats };
+  if (repeats.length) {
+    finalDecision.memo =
+      `${decision.memo} ${repeats.length} of the council's selections were already live on your ledger and were not re-staked — they stay graded once.`.trim();
+  }
+
   await db
     .update(runs)
-    .set({ status: "completed", council: decision, completedAt: new Date() })
+    .set({ status: "completed", council: finalDecision, completedAt: new Date() })
     .where(eq(runs.id, runId));
 }
 
-async function buildLessons(): Promise<string[]> {
+/** Stable identity of a wager: same bet on the same game = same key. */
+function dedupeKeyFor(slateDate: string, c: Candidate): string {
+  const g = c.grade;
+  return [
+    slateDate,
+    c.game.sport,
+    c.game.eventId,
+    c.category,
+    g.side ?? "",
+    g.line ?? "",
+    g.teamAbbr ?? "",
+    g.player ?? "",
+    g.stat ?? "",
+    g.segment ?? "FULL",
+  ].join("|");
+}
+
+async function buildLessons(ownerId: string = HOUSE): Promise<string[]> {
   const graded = await db
     .select()
     .from(predictions)
-    .where(ne(predictions.outcome, "pending"))
+    .where(and(eq(predictions.ownerId, ownerId), ne(predictions.outcome, "pending")))
     .orderBy(desc(predictions.id))
     .limit(150);
   const lessons: string[] = [];
@@ -1044,13 +1110,17 @@ async function buildLessons(): Promise<string[]> {
 // agents their rating adjustments (wins/losses ripple through the roster)
 // ---------------------------------------------------------------------------
 
-export async function gradePending(): Promise<{ graded: number; wins: number; losses: number; pushes: number }> {
+export async function gradePending(ownerId: string = HOUSE): Promise<{ graded: number; wins: number; losses: number; pushes: number }> {
   await ensureSchema();
   const pending = await db
     .select()
     .from(predictions)
     .where(
-      and(eq(predictions.outcome, "pending"), lt(predictions.startTime, new Date(Date.now() - 45 * 60_000))),
+      and(
+        eq(predictions.ownerId, ownerId),
+        eq(predictions.outcome, "pending"),
+        lt(predictions.startTime, new Date(Date.now() - 45 * 60_000)),
+      ),
     )
     .limit(250);
   if (!pending.length) return { graded: 0, wins: 0, losses: 0, pushes: 0 };
@@ -1145,6 +1215,6 @@ export async function gradePending(): Promise<{ graded: number; wins: number; lo
   }
 
   // settle agent ratings afterwards (drives retraining)
-  await settleAgentRatings(creditList);
+  await settleAgentRatings(creditList, ownerId);
   return { graded, wins, losses, pushes };
 }

@@ -1,8 +1,9 @@
 import { db } from "@/db";
 import { agents, type AgentRow, type ImprovementEntry } from "@/db/schema";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { targetFor } from "./llm";
 import { ensureSchema } from "./schema";
+import { HOUSE } from "./owner";
 
 export interface AgentDef {
   id: string;
@@ -169,31 +170,43 @@ trim the weakest bets down. Conflicting-scout games never exceed 1u. Capital pre
 
 export const DEFAULT_AGENT_ORDER = AGENT_DEFS.map((d) => d.id);
 
-export async function ensureAgentsSeeded(): Promise<void> {
+/** Every workspace gets its own private copy of the roster. */
+export async function ensureAgentsSeeded(ownerId: string = HOUSE): Promise<void> {
   await ensureSchema();
-  const existing = await db.select({ id: agents.id }).from(agents);
+  const existing = await db
+    .select({ agentKey: agents.agentKey })
+    .from(agents)
+    .where(eq(agents.ownerId, ownerId));
   if (existing.length >= AGENT_DEFS.length) return;
-  const have = new Set(existing.map((r) => r.id));
+  const have = new Set(existing.map((r) => r.agentKey));
   for (const def of AGENT_DEFS) {
     if (have.has(def.id)) continue;
-    const target = targetFor(def.id);
-    await db.insert(agents).values({
-      id: def.id,
-      codename: def.codename,
-      layer: def.layer,
-      sortOrder: def.sortOrder,
-      title: def.title,
-      job: def.job,
-      prompt: def.prompt,
-      model: target?.label ?? "heuristic-core",
-      rating: 1500,
-    });
+    await db
+      .insert(agents)
+      .values({
+        id: ownerId === HOUSE ? def.id : `${ownerId}:${def.id}`,
+        ownerId,
+        agentKey: def.id,
+        codename: def.codename,
+        layer: def.layer,
+        sortOrder: def.sortOrder,
+        title: def.title,
+        job: def.job,
+        prompt: def.prompt,
+        model: "heuristic-core",
+        rating: 1500,
+      })
+      .onConflictDoNothing();
   }
 }
 
-export async function listAgents(): Promise<AgentRow[]> {
-  await ensureAgentsSeeded();
-  return db.select().from(agents).orderBy(agents.sortOrder);
+export async function listAgents(ownerId: string = HOUSE): Promise<AgentRow[]> {
+  await ensureAgentsSeeded(ownerId);
+  return db
+    .select()
+    .from(agents)
+    .where(eq(agents.ownerId, ownerId))
+    .orderBy(agents.sortOrder);
 }
 
 export function tierOf(rating: number): { name: string; tone: string } {
@@ -211,11 +224,12 @@ const K = 28;
 
 export async function settleAgentRatings(
   graded: { agents: string[]; outcome: string; confidence: number }[],
+  ownerId: string = HOUSE,
 ): Promise<void> {
   if (!graded.length) return;
-  const rows = await db.select().from(agents);
+  const rows = await db.select().from(agents).where(eq(agents.ownerId, ownerId));
   const byCode = new Map(rows.map((r) => [r.codename, r]));
-  const byId = new Map(rows.map((r) => [r.id, r]));
+  const byId = new Map(rows.map((r) => [r.agentKey, r]));
   const touched = new Map<string, typeof rows[number]>();
 
   for (const g of graded) {

@@ -72,6 +72,40 @@ export function ensureSchema(): Promise<void> {
           ON DELETE cascade ON UPDATE no action
       )
     `);
+
+    // ---- in-place upgrades for databases created by earlier versions ----
+    await db.execute(sql`
+      ALTER TABLE "agents"      ADD COLUMN IF NOT EXISTS "owner_id"   text NOT NULL DEFAULT 'house';
+    `);
+    await db.execute(sql`
+      ALTER TABLE "agents"      ADD COLUMN IF NOT EXISTS "agent_key"  text NOT NULL DEFAULT '';
+    `);
+    await db.execute(sql`
+      ALTER TABLE "runs"        ADD COLUMN IF NOT EXISTS "owner_id"   text NOT NULL DEFAULT 'house';
+    `);
+    await db.execute(sql`
+      ALTER TABLE "predictions" ADD COLUMN IF NOT EXISTS "owner_id"   text NOT NULL DEFAULT 'house';
+    `);
+    await db.execute(sql`
+      ALTER TABLE "predictions" ADD COLUMN IF NOT EXISTS "dedupe_key" text NOT NULL DEFAULT '';
+    `);
+    // legacy agent rows used the bare key as primary key
+    await db.execute(sql`
+      UPDATE "agents" SET "agent_key" = "id" WHERE "agent_key" = '';
+    `);
+    await db.execute(sql`
+      CREATE UNIQUE INDEX IF NOT EXISTS "agents_owner_key_idx"
+        ON "agents" ("owner_id", "agent_key");
+    `);
+    // Hard guarantee: one wager identity per owner can exist only once.
+    await db.execute(sql`
+      CREATE UNIQUE INDEX IF NOT EXISTS "predictions_owner_dedupe_idx"
+        ON "predictions" ("owner_id", "dedupe_key")
+        WHERE "dedupe_key" <> '';
+    `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS "runs_owner_idx" ON "runs" ("owner_id", "id" DESC);
+    `);
   })();
   return bootstrapped;
 }
