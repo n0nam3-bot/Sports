@@ -12,42 +12,92 @@ export interface LLMTarget {
   label: string;
 }
 
-export function configuredProviders(): LLMTarget[] {
-  const out: LLMTarget[] = [];
-  if (process.env.OPENROUTER_API_KEY)
-    out.push({
-      provider: "openrouter",
-      model: process.env.OPENROUTER_MODEL ?? "google/gemini-2.0-flash-001",
-      label: `openrouter/${process.env.OPENROUTER_MODEL ?? "google/gemini-2.0-flash-001"}`,
-    });
-  if (process.env.GEMINI_API_KEY)
-    out.push({
-      provider: "gemini",
-      model: process.env.GEMINI_MODEL ?? "gemini-2.0-flash",
-      label: `gemini/${process.env.GEMINI_MODEL ?? "gemini-2.0-flash"}`,
-    });
-  if (process.env.XAI_API_KEY)
-    out.push({
-      provider: "grok",
-      model: process.env.GROK_MODEL ?? "grok-3-mini",
-      label: `xai/${process.env.GROK_MODEL ?? "grok-3-mini"}`,
-    });
-  if (process.env.OLLAMA_BASE_URL)
-    out.push({
-      provider: "ollama",
-      model: process.env.OLLAMA_MODEL ?? "llama3.1",
-      label: `ollama/${process.env.OLLAMA_MODEL ?? "llama3.1"}`,
-    });
+/**
+ * Per-request credentials supplied by the visitor's own browser.
+ * These are NEVER written to the database or logs — they live in the caller's
+ * localStorage, travel on a single request, and are discarded after it ends.
+ */
+export interface KeyBag {
+  gemini?: string;
+  xai?: string;
+  openrouter?: string;
+  ollamaUrl?: string;
+  geminiModel?: string;
+  grokModel?: string;
+  openrouterModel?: string;
+  ollamaModel?: string;
+}
+
+const DEFAULT_MODELS = {
+  openrouter: "google/gemini-2.0-flash-001",
+  gemini: "gemini-2.0-flash",
+  grok: "grok-3-mini",
+  ollama: "llama3.1",
+};
+
+/** Attaches the resolved secret so calls work without touching process.env. */
+export interface ResolvedTarget extends LLMTarget {
+  secret: string;
+}
+
+export function configuredProviders(keys: KeyBag = {}): ResolvedTarget[] {
+  const out: ResolvedTarget[] = [];
+  const orKey = keys.openrouter || process.env.OPENROUTER_API_KEY;
+  if (orKey) {
+    const model = keys.openrouterModel || process.env.OPENROUTER_MODEL || DEFAULT_MODELS.openrouter;
+    out.push({ provider: "openrouter", model, label: `openrouter/${model}`, secret: orKey });
+  }
+  const gemKey = keys.gemini || process.env.GEMINI_API_KEY;
+  if (gemKey) {
+    const model = keys.geminiModel || process.env.GEMINI_MODEL || DEFAULT_MODELS.gemini;
+    out.push({ provider: "gemini", model, label: `gemini/${model}`, secret: gemKey });
+  }
+  const xaiKey = keys.xai || process.env.XAI_API_KEY;
+  if (xaiKey) {
+    const model = keys.grokModel || process.env.GROK_MODEL || DEFAULT_MODELS.grok;
+    out.push({ provider: "grok", model, label: `xai/${model}`, secret: xaiKey });
+  }
+  const ollama = keys.ollamaUrl || process.env.OLLAMA_BASE_URL;
+  if (ollama) {
+    const model = keys.ollamaModel || process.env.OLLAMA_MODEL || DEFAULT_MODELS.ollama;
+    out.push({ provider: "ollama", model, label: `ollama/${model}`, secret: ollama });
+  }
   return out;
 }
 
-// Stable hash → spread agents round-robin over providers.
-export function targetFor(agentId: string): LLMTarget | null {
-  const providers = configuredProviders();
+// Stable hash → spread agents round-robin over every configured provider.
+export function targetFor(agentId: string, keys: KeyBag = {}): ResolvedTarget | null {
+  const providers = configuredProviders(keys);
   if (!providers.length) return null;
   let h = 0;
   for (const ch of agentId) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
   return providers[h % providers.length];
+}
+
+/** Parses the x-neonslip-keys header (base64 JSON) into a KeyBag. */
+export function keysFromRequest(req: Request): KeyBag {
+  const raw = req.headers.get("x-neonslip-keys");
+  if (!raw) return {};
+  try {
+    const json = Buffer.from(raw, "base64").toString("utf8");
+    const parsed = JSON.parse(json) as Record<string, unknown>;
+    const pick = (k: string): string | undefined => {
+      const v = parsed[k];
+      return typeof v === "string" && v.trim() ? v.trim().slice(0, 400) : undefined;
+    };
+    return {
+      gemini: pick("gemini"),
+      xai: pick("xai"),
+      openrouter: pick("openrouter"),
+      ollamaUrl: pick("ollamaUrl"),
+      geminiModel: pick("geminiModel"),
+      grokModel: pick("grokModel"),
+      openrouterModel: pick("openrouterModel"),
+      ollamaModel: pick("ollamaModel"),
+    };
+  } catch {
+    return {};
+  }
 }
 
 async function post(url: string, body: unknown, headers: Record<string, string>, timeoutMs: number) {
@@ -68,7 +118,7 @@ async function post(url: string, body: unknown, headers: Record<string, string>,
 }
 
 export async function llmChat(
-  target: LLMTarget,
+  target: ResolvedTarget,
   system: string,
   user: string,
   opts: { timeoutMs?: number; json?: boolean; temperature?: number } = {},
@@ -77,7 +127,7 @@ export async function llmChat(
   const temperature = opts.temperature ?? 0.4;
   try {
     if (target.provider === "gemini") {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${target.model}:generateContent?key=${process.env.GEMINI_API_KEY}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${target.model}:generateContent?key=${encodeURIComponent(target.secret)}`;
       const data = await post(
         url,
         {
@@ -107,7 +157,7 @@ export async function llmChat(
             { role: "user", content: user },
           ],
         },
-        { authorization: `Bearer ${process.env.XAI_API_KEY}` },
+        { authorization: `Bearer ${target.secret}` },
         timeoutMs,
       );
       return data?.choices?.[0]?.message?.content ?? null;
@@ -124,7 +174,7 @@ export async function llmChat(
           ],
         },
         {
-          authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+          authorization: `Bearer ${target.secret}`,
           "http-referer": "https://neonslip.app",
           "x-title": "NEONSLIP Agent Cluster",
         },
@@ -133,7 +183,7 @@ export async function llmChat(
       return data?.choices?.[0]?.message?.content ?? null;
     }
     if (target.provider === "ollama") {
-      const base = (process.env.OLLAMA_BASE_URL ?? "http://localhost:11434").replace(/\/$/, "");
+      const base = (target.secret || "http://localhost:11434").replace(/\/$/, "");
       const data = await post(
         `${base}/api/chat`,
         {
@@ -178,7 +228,7 @@ export function extractJson<T = any>(text: string): T | null {
 }
 
 export async function llmJson<T = any>(
-  target: LLMTarget,
+  target: ResolvedTarget,
   system: string,
   user: string,
   opts: { timeoutMs?: number; temperature?: number } = {},

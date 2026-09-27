@@ -204,24 +204,49 @@ function priceOf(node: any): number | null {
   );
 }
 
-export function parseOdds(raw: any, homeAbbr?: string, awayAbbr?: string): OddsInfo | null {
+/**
+ * Largest plausible point/run/goal spread per sport. Critical guard: for
+ * baseball & hockey ESPN puts the MONEYLINE in `details` ("NYY -137"), so a
+ * naive parse yields a -137 "spread" and nonsense derived team totals.
+ */
+const MAX_SPREAD: Record<string, number> = {
+  mlb: 3.5, nhl: 3.5, nba: 30, ncaab: 45, nfl: 30, ncaaf: 65,
+};
+
+function plausibleSpread(v: number | null, sport?: string): number | null {
+  if (v == null || !Number.isFinite(v)) return null;
+  const max = sport ? (MAX_SPREAD[sport] ?? 65) : 65;
+  return Math.abs(v) <= max ? v : null;
+}
+
+export function parseOdds(
+  raw: any,
+  homeAbbr?: string,
+  awayAbbr?: string,
+  sport?: string,
+): OddsInfo | null {
   const list: any[] = Array.isArray(raw) ? raw : raw ? [raw] : [];
   // Prefer the entry that actually carries prices.
   const o =
     list.find((x) => x?.moneyline || x?.pointSpread || x?.total) ?? list[0];
   if (!o) return null;
 
-  // --- spread (ESPN's `spread` is already home-perspective) ---
-  let homeSpread: number | null =
-    typeof o.spread === "number" ? o.spread : null;
-  // Authoritative cross-check against the human-readable details string.
+  // --- spread (ESPN's numeric `spread` is home-perspective and trustworthy) ---
+  let homeSpread: number | null = plausibleSpread(
+    typeof o.spread === "number" ? o.spread : null,
+    sport,
+  );
+  // Cross-check against the readable details string — but ONLY when the value
+  // is a plausible spread for the sport. In MLB/NHL this field is a moneyline.
   const det: string = typeof o.details === "string" ? o.details : "";
   const m = det.match(/^([A-Z&.\-]{2,5})\s+([+-]?\d+(?:\.\d+)?)/);
   if (m && homeAbbr && awayAbbr) {
     const [, abbr, numStr] = m;
-    const num = parseFloat(numStr);
-    if (abbr === homeAbbr) homeSpread = num;
-    else if (abbr === awayAbbr) homeSpread = -num;
+    const fromDetails = plausibleSpread(parseFloat(numStr), sport);
+    if (fromDetails != null) {
+      if (abbr === homeAbbr) homeSpread = fromDetails;
+      else if (abbr === awayAbbr) homeSpread = -fromDetails;
+    }
   } else if (/^(EVEN|PK)/i.test(det) && homeSpread == null) {
     homeSpread = 0;
   }
@@ -257,6 +282,20 @@ export function parseOdds(raw: any, homeAbbr?: string, awayAbbr?: string): OddsI
     homeTeamTotal = Math.round((half - homeSpread / 2) * 2) / 2;
     awayTeamTotal = Math.round((half + homeSpread / 2) * 2) / 2;
     teamTotalsDerived = true;
+  }
+  // Final sanity gate: a team total must sit strictly between 0 and the game
+  // total. Anything else means an upstream field was misread — drop it rather
+  // than publish a nonsense line.
+  const sane = (tt: number | null): number | null =>
+    tt != null && Number.isFinite(tt) && tt > 0 && (overUnder == null || tt < overUnder)
+      ? tt
+      : null;
+  homeTeamTotal = sane(homeTeamTotal);
+  awayTeamTotal = sane(awayTeamTotal);
+  if (homeTeamTotal == null || awayTeamTotal == null) {
+    homeTeamTotal = null;
+    awayTeamTotal = null;
+    teamTotalsDerived = false;
   }
 
   return {
@@ -378,7 +417,7 @@ function parseEvent(evt: any, sport: string): GameInfo {
     venue: comp.venue?.fullName ?? "",
     home,
     away,
-    odds: parseOdds(comp.odds, home.abbr, away.abbr),
+    odds: parseOdds(comp.odds, home.abbr, away.abbr, sport),
     injuries: [],
     rest: null,
     leaders: parseLeaders(comp, home, away),
@@ -573,7 +612,7 @@ export async function getSlateDetailed(
         if (sum) {
           g.injuries = parseInjuries(sum);
           if (!g.odds && sum.pickcenter)
-            g.odds = parseOdds(sum.pickcenter, g.home.abbr, g.away.abbr);
+            g.odds = parseOdds(sum.pickcenter, g.home.abbr, g.away.abbr, g.sport);
           if (!g.leaders.length && sum.leaders)
             g.leaders = parseLeaders({ leaders: sum.leaders }, g.home, g.away);
         }

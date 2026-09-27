@@ -14,7 +14,7 @@ import {
   lookupPlayerStat,
   type GameInfo,
 } from "./espn";
-import { llmJson, targetFor } from "./llm";
+import { llmJson, targetFor, type KeyBag } from "./llm";
 import { ensureAgentsSeeded, settleAgentRatings } from "./agents";
 import { ensureSchema } from "./schema";
 
@@ -593,13 +593,13 @@ async function trace(runId: number, entry: Omit<TraceEntry, "at">): Promise<void
   await db.update(runs).set({ trace: next }).where(eq(runs.id, runId));
 }
 
-export async function runPipeline(runId: number): Promise<void> {
+export async function runPipeline(runId: number, keys: KeyBag = {}): Promise<void> {
   const [run] = await db.select().from(runs).where(eq(runs.id, runId));
   if (!run) return;
   await ensureAgentsSeeded();
   const roster = await db.select().from(agents);
   const agent = (key: string) => roster.find((a) => a.codename === key || a.id === key);
-  const nowMode = targetFor("scout-quant") ? "llm" : "heuristic";
+  const nowMode = targetFor("scout-quant", keys) ? "llm" : "heuristic";
 
   try {
     await trace(runId, {
@@ -660,7 +660,7 @@ export async function runPipeline(runId: number): Promise<void> {
 
     for (const code of ["QUANT", "MEDIC", "CHRONO", "MATCHUP", "SHARP"] as const) {
       const a = agent(code);
-      const target = a ? targetFor(a.id) : null;
+      const target = a ? targetFor(a.id, keys) : null;
       const scope: Record<string, string> = {
         QUANT: `power lines built for ${pre.length} games — ${allCandidates.filter((c) => c.category === "spread" || c.category === "moneyline").length} model-vs-market gaps beyond threshold flagged for the analysts.`,
         MEDIC: `injury sweep complete — ${pre.filter((g) => g.injuries.length > 0).length} games carry reportable absences; point-impact pricing delivered to STRATEGA.`,
@@ -688,7 +688,7 @@ export async function runPipeline(runId: number): Promise<void> {
 
     // PROPS — player props only when a language model is actually online
     const propsAgent = agent("PROPS");
-    const propsTarget = propsAgent ? targetFor(propsAgent.id) : null;
+    const propsTarget = propsAgent ? targetFor(propsAgent.id, keys) : null;
     let propCount = 0;
     if (propsTarget && propsAgent) {
       interface PropSug { eventIdx: number; player: string; stat: string; direction: "over" | "under"; line: number; why: string }
@@ -742,7 +742,7 @@ export async function runPipeline(runId: number): Promise<void> {
     // ---------------- Layer 2: analysts ----------------
     allCandidates.sort((a, b) => b.confidence - a.confidence);
     const stratega = agent("analyst-stratega") ?? agent("STRATEGA");
-    const strategaTarget = stratega ? targetFor(stratega.id) : null;
+    const strategaTarget = stratega ? targetFor(stratega.id, keys) : null;
     const top = allCandidates.slice(0, 14);
     if (strategaTarget && stratega) {
       interface Verdict { id: number; confidence?: number; thesis?: string }
@@ -792,7 +792,7 @@ export async function runPipeline(runId: number): Promise<void> {
       }
     }
     const contrarian = agent("CONTRARIAN");
-    const contraTarget = contrarian ? targetFor(contrarian.id) : null;
+    const contraTarget = contrarian ? targetFor(contrarian.id, keys) : null;
     if (contraTarget && contrarian && !vetoCount && allCandidates.length > 2) {
       interface Audit { id: number; verdict: "CONFIRM" | "DISCOUNT" | "VETO"; why?: string }
       const out = await llmJson<{ audits?: Audit[] }>(
@@ -910,7 +910,7 @@ export async function runPipeline(runId: number): Promise<void> {
     card.sort((a, b) => b.confidence - a.confidence);
 
     const commissioner = agent("COMMISSIONER");
-    const commTarget = commissioner ? targetFor(commissioner.id) : null;
+    const commTarget = commissioner ? targetFor(commissioner.id, keys) : null;
     let decision: CouncilDecision = {
       headline: card.length ? `${card.length}-play card approved for ${run.slateDate}` : "Council passes — no release",
       memo: card.length
