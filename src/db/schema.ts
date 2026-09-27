@@ -31,6 +31,8 @@ export interface CouncilDecision {
   headline: string;
   memo: string;
   avoided: string[];
+  /** Picks the council re-selected that were already live on your ledger. */
+  repeats?: { pick: string; matchup: string; firstRunId: number; outcome: string }[];
 }
 
 export type BetCategory =
@@ -60,7 +62,10 @@ export interface GradeSpec {
 }
 
 export const agents = pgTable("agents", {
+  // id is `${ownerId}:${agentKey}` for per-visitor rosters
   id: text("id").primaryKey(),
+  ownerId: text("owner_id").notNull().default("house"),
+  agentKey: text("agent_key").notNull().default(""),
   codename: text("codename").notNull(),
   layer: text("layer").notNull(),
   sortOrder: integer("sort_order").notNull().default(0),
@@ -83,6 +88,7 @@ export const agents = pgTable("agents", {
 
 export const runs = pgTable("runs", {
   id: serial("id").primaryKey(),
+  ownerId: text("owner_id").notNull().default("house"),
   slateDate: text("slate_date").notNull(), // YYYY-MM-DD
   sports: jsonb("sports").$type<string[]>().notNull(),
   status: text("status").notNull().default("running"), // running | completed | failed
@@ -106,6 +112,9 @@ export const runs = pgTable("runs", {
 
 export const predictions = pgTable("predictions", {
   id: serial("id").primaryKey(),
+  ownerId: text("owner_id").notNull().default("house"),
+  // stable identity of a wager: same bet twice must never be counted twice
+  dedupeKey: text("dedupe_key").notNull().default(""),
   runId: integer("run_id")
     .notNull()
     .references(() => runs.id, { onDelete: "cascade" }),
