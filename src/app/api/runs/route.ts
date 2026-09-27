@@ -4,6 +4,7 @@ import { predictions, runs } from "@/db/schema";
 import { desc, inArray } from "drizzle-orm";
 import { runPipeline } from "@/lib/engine";
 import { ensureSchema } from "@/lib/schema";
+import { keysFromRequest } from "@/lib/llm";
 
 export const dynamic = "force-dynamic";
 // Serverless safety: background pipelines are killed on freeze, so on
@@ -42,12 +43,14 @@ export async function POST(req: NextRequest) {
     .insert(runs)
     .values({ slateDate: body.date, sports: body.sports.slice(0, 6), status: "running" })
     .returning();
+  // Visitor-supplied keys ride along on this one request and are never stored.
+  const keys = keysFromRequest(req);
   if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME) {
     // function hosts freeze after the response — run the cluster inline
-    await runPipeline(run.id);
+    await runPipeline(run.id, keys);
   } else {
     // long-lived Node hosts: fire-and-forget, client polls the live trace
-    void runPipeline(run.id).catch(() => {});
+    void runPipeline(run.id, keys).catch(() => {});
   }
   return Response.json({ id: run.id });
 }
