@@ -72,5 +72,23 @@ and set `DATABASE_URL`. Long-lived server: full fire-and-forget pipeline + polli
 `DATABASE_URL` (required) · `GEMINI_API_KEY` (+`GEMINI_MODEL`) · `XAI_API_KEY` (+`GROK_MODEL`) ·
 `OPENROUTER_API_KEY` (+`OPENROUTER_MODEL`) · `OLLAMA_BASE_URL` (+`OLLAMA_MODEL`)
 
+## Bring Your Own AI (no hardcoding, no accounts)
+
+Visitors can plug in **their own** free API keys with the **ADD AI KEYS** button in the header:
+
+- Keys are stored in **that visitor's browser localStorage** — they persist across refreshes and
+  return visits on that device, and never need re-entering.
+- They ride along on that person's requests via a single `x-neonslip-keys` header and are used
+  server-side for that request only.
+- They are **never written to the database, never logged, never shared** between visitors.
+  Two people on the same deployment each use their own models (or none).
+- **Test keys** live-fires a probe at each provider so users see green/red instantly.
+- **Wipe vault** removes them from the device.
+
+This is deliberately account-free: usernames/passwords would mean *storing other people's API keys
+on your server*, which is a liability you don't want. Device-local keys give the same convenience
+with none of the custody risk. Set server env vars instead if you'd rather fund the AI yourself
+for everyone.
+
 ## Disclaimer
 For entertainment & research. No outcome is guaranteed. Never bet what you can't afford to lose.
