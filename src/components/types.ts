@@ -27,7 +27,8 @@ export interface SlateResp {
 }
 
 export interface TraceC { at: string; layer: string; agent: string; message: string; mood: string }
-export interface CouncilC { headline: string; memo: string; avoided: string[] }
+export interface RepeatC { pick: string; matchup: string; firstRunId: number; outcome: string }
+export interface CouncilC { headline: string; memo: string; avoided: string[]; repeats?: RepeatC[] }
 export interface PredC {
   id: number; runId: number; sortOrder: number; slateDate: string; sport: string;
   eventId: string; matchup: string; startTime: string | null;

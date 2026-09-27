@@ -15,6 +15,90 @@ interface ProviderTest {
   error: string | null;
 }
 
+/** Curated free / free-tier-friendly models per provider. */
+const MODEL_CHOICES: Record<string, { value: string; note: string }[]> = {
+  gemini: [
+    { value: "gemini-2.0-flash", note: "fast · best free tier" },
+    { value: "gemini-2.0-flash-lite", note: "cheapest · highest limits" },
+    { value: "gemini-2.5-flash", note: "newer · stronger reasoning" },
+    { value: "gemini-1.5-flash", note: "legacy fallback" },
+  ],
+  openrouter: [
+    { value: "google/gemini-2.0-flash-exp:free", note: "free route" },
+    { value: "meta-llama/llama-3.3-70b-instruct:free", note: "free route" },
+    { value: "deepseek/deepseek-chat-v3-0324:free", note: "free route" },
+    { value: "qwen/qwen-2.5-72b-instruct:free", note: "free route" },
+    { value: "google/gemini-2.0-flash-001", note: "paid · very cheap" },
+  ],
+  xai: [
+    { value: "grok-3-mini", note: "cheapest grok" },
+    { value: "grok-3", note: "flagship" },
+    { value: "grok-2-1212", note: "previous gen" },
+  ],
+  ollamaUrl: [
+    { value: "llama3.1", note: "8B · solid default" },
+    { value: "llama3.2", note: "3B · very fast" },
+    { value: "qwen2.5", note: "strong at JSON" },
+    { value: "mistral", note: "7B · lightweight" },
+    { value: "phi3", note: "tiny · low RAM" },
+  ],
+};
+
+const OTHER = "__other__";
+
+function ModelPicker({
+  provider,
+  value,
+  placeholder,
+  onChange,
+}: {
+  provider: string;
+  value: string;
+  placeholder: string;
+  onChange: (v: string) => void;
+}) {
+  const choices = MODEL_CHOICES[provider] ?? [];
+  const known = choices.some((c) => c.value === value);
+  const [custom, setCustom] = useState(!known && value !== "");
+
+  return (
+    <div className="flex flex-1 flex-col gap-2">
+      <select
+        value={custom ? OTHER : value || ""}
+        onChange={(e) => {
+          if (e.target.value === OTHER) {
+            setCustom(true);
+            onChange("");
+          } else {
+            setCustom(false);
+            onChange(e.target.value);
+          }
+        }}
+        className="w-full border border-white/12 bg-[#05080f] px-3 py-2.5 font-mono text-[11px] text-[#8fa3bd] outline-none transition focus:border-[#39d5ff]/50"
+      >
+        <option value="">default ({placeholder})</option>
+        {choices.map((c) => (
+          <option key={c.value} value={c.value}>
+            {c.value} — {c.note}
+          </option>
+        ))}
+        <option value={OTHER}>Other — type a model id…</option>
+      </select>
+      {custom && (
+        <input
+          type="text"
+          autoComplete="off"
+          spellCheck={false}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder="exact model id, e.g. mistralai/mistral-7b-instruct:free"
+          className="w-full border border-[#39d5ff]/30 bg-[#05080f] px-3 py-2.5 font-mono text-[11px] text-[#d7e3f0] outline-none focus:border-[#39d5ff]/60"
+        />
+      )}
+    </div>
+  );
+}
+
 const FIELDS: {
   key: keyof KeyVault;
   modelKey?: keyof KeyVault;
@@ -186,7 +270,7 @@ export default function KeysModal({
                   )}
                 </div>
                 <p className="mb-2 text-[11px] leading-snug text-[#5f7089]">{f.blurb}</p>
-                <div className="flex flex-col gap-2 sm:flex-row">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
                   <input
                     type={reveal ? "text" : "password"}
                     autoComplete="off"
@@ -197,14 +281,11 @@ export default function KeysModal({
                     className="flex-[2] border border-white/12 bg-[#05080f] px-3 py-2.5 font-mono text-[12px] text-[#d7e3f0] outline-none transition focus:border-[#37ff8b]/50"
                   />
                   {f.modelKey && (
-                    <input
-                      type="text"
-                      autoComplete="off"
-                      spellCheck={false}
+                    <ModelPicker
+                      provider={f.key}
                       value={draft[f.modelKey]}
-                      onChange={(e) => set(f.modelKey!, e.target.value)}
-                      placeholder={f.modelPlaceholder}
-                      className="flex-1 border border-white/12 bg-[#05080f] px-3 py-2.5 font-mono text-[11px] text-[#8fa3bd] outline-none transition focus:border-[#39d5ff]/50"
+                      placeholder={f.modelPlaceholder ?? ""}
+                      onChange={(v) => set(f.modelKey!, v)}
                     />
                   )}
                 </div>

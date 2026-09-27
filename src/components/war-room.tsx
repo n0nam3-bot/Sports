@@ -4,7 +4,7 @@ import { useEffect, useRef } from "react";
 import {
   Activity, Ban, Brain, CalendarDays, CheckCircle2, CircleDot, Cpu, Flame,
   Gauge, Loader2, Lock, Play, RefreshCw, ShieldAlert, Siren, Sparkles, Ticket,
-  TrendingUp, Users2, XOctagon,
+  TrendingUp, Users2, XOctagon, Repeat,
 } from "lucide-react";
 import type { GameC, PredC, RunC, SlateResp } from "./types";
 import { CategoryChip, Chip, ConfBar, NeonButton, OutcomeChip, Panel, TeamMark, cx } from "./ui";
@@ -231,6 +231,25 @@ export default function WarRoom(props: {
                 </div>
               </div>
             </div>
+            {!!council.repeats?.length && (
+              <div className="mt-3 border-t border-white/6 pt-3">
+                <div className="mb-1.5 flex items-center gap-1.5 font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-[#39d5ff]">
+                  <Repeat className="h-3.5 w-3.5" /> already on your ledger — not re-staked
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {council.repeats.slice(0, 8).map((r, i) => (
+                    <span
+                      key={i}
+                      className="clip-tag border border-[#39d5ff]/20 bg-[#39d5ff]/6 px-2 py-0.5 font-mono text-[9.5px] uppercase tracking-wider text-[#7fd4f5]"
+                      title={`first released on run #${r.firstRunId} — counts once`}
+                    >
+                      {r.pick} · run #{r.firstRunId} · {r.outcome}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {!!council.avoided?.length && (
               <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-white/6 pt-3">
                 <span className="mr-1 flex items-center gap-1 font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-[#ff4757]">

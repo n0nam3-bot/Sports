@@ -28,6 +28,30 @@ export const EMPTY_VAULT: KeyVault = {
 };
 
 const STORAGE_KEY = "neonslip.vault.v1";
+const OWNER_KEY = "neonslip.owner.v1";
+
+/**
+ * Private workspace id for this browser. Everything the cluster produces for
+ * you — runs, picks, agent prompts and ratings — is filed under it, so your
+ * record is yours alone and nobody can edit your tuned prompts.
+ */
+export function getOwnerId(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    let id = window.localStorage.getItem(OWNER_KEY);
+    if (!id || id.length < 8) {
+      const raw =
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+      id = `w${raw.replace(/[^a-zA-Z0-9]/g, "").slice(0, 24)}`;
+      window.localStorage.setItem(OWNER_KEY, id);
+    }
+    return id;
+  } catch {
+    return "";
+  }
+}
 
 export function loadVault(): KeyVault {
   if (typeof window === "undefined") return { ...EMPTY_VAULT };
@@ -81,5 +105,7 @@ export async function vaultFetch(
   const encoded = encodeVault(v);
   const headers = new Headers(init.headers);
   if (encoded) headers.set("x-neonslip-keys", encoded);
+  const owner = getOwnerId();
+  if (owner) headers.set("x-neonslip-owner", owner);
   return fetch(input, { ...init, headers });
 }

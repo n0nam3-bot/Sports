@@ -67,8 +67,8 @@ export default function RunsView({ runs, grade }: { runs: RunC[]; grade: () => P
           <Panel className="flex w-full items-center gap-3 px-4 py-3">
             <Vault className="h-5 w-5 text-[#9d7bff]" />
             <p className="font-mono text-[9.5px] uppercase leading-relaxed tracking-[0.14em] text-[#5f7089]">
-              every graded slip feeds the council — agents that sink below a 45.5% strike rate are forced to rewrite
-              their own playbook. watch the roster page evolve.
+              this ledger is private to your device — your record, your agents, your prompts. duplicate picks are
+              detected and graded once, so re-running a slate never inflates your win rate.
             </p>
           </Panel>
         </div>
