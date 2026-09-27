@@ -3,12 +3,21 @@ import { db } from "@/db";
 import { agents } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { listAgents } from "@/lib/agents";
+import { keysFromRequest, targetFor } from "@/lib/llm";
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 30;
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const keys = keysFromRequest(req);
   const list = await listAgents();
-  return Response.json({ agents: list });
+  // Model assignment is computed live so visitor-supplied keys are reflected
+  // immediately, without persisting anyone's credentials.
+  const withLive = list.map((a) => ({
+    ...a,
+    model: targetFor(a.id, keys)?.label ?? "heuristic-core",
+  }));
+  return Response.json({ agents: withLive });
 }
 
 // Operator override: hand-tune an agent's prompt or model label.
