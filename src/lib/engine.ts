@@ -1141,6 +1141,7 @@ export function unitsFor(c: { confidence: number; category: string; signals?: st
 
 async function finishRun(runId: number, ownerId: string, slateDate: string, decision: CouncilDecision, card: Candidate[]): Promise<void> {
   const repeats: NonNullable<CouncilDecision["repeats"]> = [];
+  const carried: number[] = [];
   let released = 0;
 
   for (const c of card) {
@@ -1159,6 +1160,8 @@ async function finishRun(runId: number, ownerId: string, slateDate: string, deci
       .limit(1);
 
     if (existing) {
+      // Already staked — show it on this card, but never grade it twice.
+      carried.push(existing.id);
       repeats.push({
         pick: c.pick,
         matchup: c.game.matchup,
@@ -1208,12 +1211,12 @@ async function finishRun(runId: number, ownerId: string, slateDate: string, deci
   const finalDecision: CouncilDecision = { ...decision, repeats };
   if (repeats.length) {
     finalDecision.memo =
-      `${decision.memo} ${repeats.length} of the council's selections were already live on your ledger and were not re-staked — they stay graded once.`.trim();
+      `${decision.memo} ${repeats.length} of these ${repeats.length + released} selections were already staked on an earlier run — they are shown again here but stay graded once.`.trim();
   }
 
   await db
     .update(runs)
-    .set({ status: "completed", council: finalDecision, completedAt: new Date() })
+    .set({ status: "completed", council: finalDecision, carried, completedAt: new Date() })
     .where(eq(runs.id, runId));
 }
 

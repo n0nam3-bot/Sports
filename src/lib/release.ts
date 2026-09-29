@@ -1,6 +1,6 @@
 export const RELEASE = {
-  version: "3.2.0",
-  name: "Combat Odds + Market Focus",
+  version: "3.3.0",
+  name: "Combat Odds + Rerun Fix",
   built: "2026-09-29",
   sports: ["NBA", "NFL", "NCAAF", "NCAAB", "MLB", "NHL", "UFC", "DWCS", "PFL"],
   features: {
@@ -17,6 +17,7 @@ export const RELEASE = {
     byoAiKeys: true,
     modelDropdowns: true,
     combatModelOdds: true,
+    rerunShowsFullCard: true,
   },
   boxing: {
     enabled: false,
