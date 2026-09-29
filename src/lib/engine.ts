@@ -226,7 +226,7 @@ function combatCandidates(g: GameInfo, nextId: () => number): Candidate[] {
   // ---- winner ----
   // DWCS/PFL prospect fights are frequently near coin-flips; only a real
   // separation in record strength earns a side.
-  if (pFav >= 0.55) {
+  if (pFav >= 0.53) {
     out.push({
       id: nextId(), game: g, category: "fight_ml",
       pick: `${fav.name} to win`,
@@ -241,7 +241,7 @@ function combatCandidates(g: GameInfo, nextId: () => number): Candidate[] {
   }
 
   // ---- method: finish vs decision ----
-  if (Math.abs(m.pFinish - 0.5) >= 0.05) {
+  if (Math.abs(m.pFinish - 0.5) >= 0.03) {
     const finish = m.pFinish > 0.5;
     const price = finish ? m.fairFinish : m.fairDecision;
     out.push({
@@ -260,7 +260,7 @@ function combatCandidates(g: GameInfo, nextId: () => number): Candidate[] {
   }
 
   // ---- round totals ----
-  if (Math.abs(m.pRoundsOver - 0.5) >= 0.05) {
+  if (Math.abs(m.pRoundsOver - 0.5) >= 0.03) {
     const over = m.pRoundsOver > 0.5;
     const price = over ? m.fairRoundsOver : m.fairRoundsUnder;
     out.push({
