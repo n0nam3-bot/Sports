@@ -1,18 +1,23 @@
 import { db } from "@/db";
 import { predictions, runs } from "@/db/schema";
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
+import { ownerFromRequest } from "@/lib/owner";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 30;
 
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
   const runId = Number(id);
   if (!Number.isFinite(runId)) return Response.json({ error: "bad id" }, { status: 400 });
-  const [run] = await db.select().from(runs).where(eq(runs.id, runId));
+  const owner = ownerFromRequest(req);
+  const [run] = await db
+    .select()
+    .from(runs)
+    .where(and(eq(runs.id, runId), eq(runs.ownerId, owner)));
   if (!run) return Response.json({ error: "not found" }, { status: 404 });
   const preds = await db
     .select()
