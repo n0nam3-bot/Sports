@@ -1,6 +1,6 @@
 export const RELEASE = {
-  version: "3.1.0",
-  name: "Combat + Market Focus",
+  version: "3.2.0",
+  name: "Combat Odds + Market Focus",
   built: "2026-09-29",
   sports: ["NBA", "NFL", "NCAAF", "NCAAB", "MLB", "NHL", "UFC", "DWCS", "PFL"],
   features: {
@@ -16,10 +16,17 @@ export const RELEASE = {
     duplicateProtection: true,
     byoAiKeys: true,
     modelDropdowns: true,
+    combatModelOdds: true,
   },
   boxing: {
     enabled: false,
-    reason: "No reliable free bout-level schedule, records, results, and grading feed is available.",
+    reason:
+      "ESPN returns 'Invalid sport (boxing)' and no free feed publishes bout-level schedules, records or results to grade. Shown as unavailable rather than faked.",
+  },
+  mmaOdds: {
+    source: "model",
+    reason:
+      "ESPN's MMA odds endpoint returns zero items for every bout, so UFC/DWCS/PFL prices are the model's own fair numbers and are labelled as such.",
   },
 } as const;
 

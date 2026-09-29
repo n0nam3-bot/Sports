@@ -211,94 +211,68 @@ function mlFair(margin: number, sport: string): number {
   return Math.round(((1 - p) / p) * 100);
 }
 
-/** Fight-record strength: win rate weighted by experience depth. */
-function fighterStrength(record: string): { pct: number; fights: number } {
-  const m = record.match(/(\d+)\D+(\d+)(?:\D+(\d+))?/);
-  if (!m) return { pct: 0.5, fights: 0 };
-  const w = Number(m[1]), l = Number(m[2]), d = Number(m[3] ?? 0);
-  const fights = w + l + d;
-  if (!fights) return { pct: 0.5, fights: 0 };
-  // shrink toward .500 when the sample is thin
-  const raw = (w + 0.5 * d) / fights;
-  const k = 6;
-  return { pct: (raw * fights + 0.5 * k) / (fights + k), fights };
-}
-
 function combatCandidates(g: GameInfo, nextId: () => number): Candidate[] {
   const c = g.combat;
   if (!c) return [];
-  const A = fighterStrength(g.away.record);
-  const B = fighterStrength(g.home.record);
-  const diff = B.pct - A.pct;
-  // experience edge matters when records look similar
-  const expEdge = Math.max(-0.06, Math.min(0.06, (B.fights - A.fights) * 0.004));
-  const pHome = Math.min(0.88, Math.max(0.12, 0.5 + diff * 1.9 + expEdge));
+  const m = c.model;
   const out: Candidate[] = [];
-  const mkFair = (p: number) =>
-    p >= 0.5 ? -Math.round((p / (1 - p)) * 100) : Math.round(((1 - p) / p) * 100);
-
-  const favHome = pHome >= 0.5;
-  const pFav = favHome ? pHome : 1 - pHome;
+  const favHome = m.pHome >= 0.5;
+  const pFav = Math.max(m.pHome, m.pAway);
   const fav = favHome ? g.home : g.away;
   const dog = favHome ? g.away : g.home;
+  const favPrice = favHome ? m.fairHomeML : m.fairAwayML;
+  const priceTag = `${favPrice > 0 ? "+" : ""}${favPrice}`;
 
   // ---- winner ----
-  if (pFav >= 0.58) {
+  // DWCS/PFL prospect fights are frequently near coin-flips; only a real
+  // separation in record strength earns a side.
+  if (pFav >= 0.55) {
     out.push({
       id: nextId(), game: g, category: "fight_ml",
       pick: `${fav.name} to win`,
-      lineLabel: "moneyline",
-      odds: mkFair(pFav),
+      lineLabel: `model ${priceTag}`,
+      odds: favPrice,
       edge: (pFav - 0.5) * 100,
       confidence: Math.min(66, 52 + (pFav - 0.5) * 52 + jitter(g.eventId + "fml")),
       signals: ["QUANT", "MATCHUP"],
-      thesis: `${fav.name} (${fav.record}) versus ${dog.name} (${dog.record}) in a ${c.weightClass} bout. Record-strength model makes ${fav.name} a ${(pFav * 100).toFixed(0)}% favourite — fair price ${mkFair(pFav) > 0 ? "+" : ""}${mkFair(pFav)}. No book line is published on the free feed, so shop this against your sportsbook.`,
+      thesis: `${fav.name} (${fav.record}) vs ${dog.name} (${dog.record}) at ${c.weightClass}. Record strength and experience depth make ${fav.name} a ${(pFav * 100).toFixed(0)}% favourite — model fair price ${priceTag}. No sportsbook line exists on the free feed, so only bet this if your book is longer than ${priceTag}.`,
       grade: { side: favHome ? "home" : "away", line: null },
     });
   }
 
   // ---- method: finish vs decision ----
-  // Mismatches and heavier classes finish more; championship distance drags
-  // fights toward the scorecards.
-  const heavy = /heavy|light heavy|middle/i.test(c.weightClass);
-  const light = /straw|fly|bantam|feather/i.test(c.weightClass);
-  let pFinish = 0.46 + (pFav - 0.5) * 0.55 + (heavy ? 0.1 : 0) - (light ? 0.08 : 0);
-  if (c.scheduledRounds === 5) pFinish -= 0.04;
-  pFinish = Math.min(0.78, Math.max(0.24, pFinish));
-  if (Math.abs(pFinish - 0.5) >= 0.07) {
-    const finish = pFinish > 0.5;
+  if (Math.abs(m.pFinish - 0.5) >= 0.05) {
+    const finish = m.pFinish > 0.5;
+    const price = finish ? m.fairFinish : m.fairDecision;
     out.push({
       id: nextId(), game: g, category: "fight_method",
       pick: finish
-        ? `${g.away.abbr} vs ${g.home.abbr} — fight does NOT go the distance`
-        : `${g.away.abbr} vs ${g.home.abbr} — fight GOES the distance`,
+        ? `${g.away.abbr} vs ${g.home.abbr} — does NOT go the distance`
+        : `${g.away.abbr} vs ${g.home.abbr} — GOES the distance`,
       lineLabel: finish ? "inside the distance" : "decision",
-      odds: mkFair(finish ? pFinish : 1 - pFinish),
-      edge: Math.abs(pFinish - 0.5) * 100,
-      confidence: Math.min(62, 52 + Math.abs(pFinish - 0.5) * 42 + jitter(g.eventId + "fm")),
+      odds: price,
+      edge: Math.abs(m.pFinish - 0.5) * 100,
+      confidence: Math.min(62, 52 + Math.abs(m.pFinish - 0.5) * 42 + jitter(g.eventId + "fm")),
       signals: ["MATCHUP", "PROPS"],
-      thesis: `${c.weightClass}${c.scheduledRounds === 5 ? " (5-round)" : ""}. Skill gap and division finishing tendencies model a ${(pFinish * 100).toFixed(0)}% chance of a stoppage, favouring ${finish ? "the fight ending early" : "the scorecards"}.`,
+      thesis: `${c.weightClass}${c.scheduledRounds === 5 ? " (5-round)" : ""}. Division finishing tendencies and the skill gap model a ${(m.pFinish * 100).toFixed(0)}% stoppage chance, favouring ${finish ? "an early finish" : "the scorecards"} at a model price of ${price > 0 ? "+" : ""}${price}.`,
       grade: { side: finish ? "under" : "over", line: c.scheduledRounds, segment: "FIGHT" },
     });
   }
 
   // ---- round totals ----
-  const line = c.scheduledRounds === 5 ? 2.5 : 1.5;
-  // expected duration falls as finish probability rises
-  const expRounds = c.scheduledRounds * (1 - pFinish * 0.55);
-  const gap = expRounds - line;
-  if (Math.abs(gap) >= 0.32) {
-    const over = gap > 0;
+  if (Math.abs(m.pRoundsOver - 0.5) >= 0.05) {
+    const over = m.pRoundsOver > 0.5;
+    const price = over ? m.fairRoundsOver : m.fairRoundsUnder;
     out.push({
       id: nextId(), game: g, category: "fight_rounds",
-      pick: `${g.away.abbr} vs ${g.home.abbr} — ${over ? "over" : "under"} ${line} rounds`,
-      lineLabel: `${over ? "o" : "u"}${line} rounds`,
-      odds: -115,
-      edge: Math.abs(gap) * 10,
-      confidence: Math.min(60, 52 + Math.min(6, Math.abs(gap) * 7) + jitter(g.eventId + "fr")),
+      pick: `${g.away.abbr} vs ${g.home.abbr} — ${over ? "over" : "under"} ${m.roundLine} rounds`,
+      lineLabel: `${over ? "o" : "u"}${m.roundLine} rounds`,
+      odds: price,
+      edge: Math.abs(m.pRoundsOver - 0.5) * 100,
+      confidence: Math.min(60, 52 + Math.abs(m.pRoundsOver - 0.5) * 34 + jitter(g.eventId + "fr")),
       signals: ["MATCHUP", "PROPS"],
-      thesis: `Model expects roughly ${expRounds.toFixed(1)} rounds of action in this ${c.scheduledRounds}-rounder (${(pFinish * 100).toFixed(0)}% stoppage risk), landing ${over ? "beyond" : "short of"} the ${line} number.`,
-      grade: { side: over ? "over" : "under", line, segment: "FIGHT" },
+      thesis: `Model expects about ${m.expRounds.toFixed(1)} completed rounds in this ${c.scheduledRounds}-rounder (${(m.pFinish * 100).toFixed(0)}% stoppage risk), landing ${over ? "beyond" : "short of"} ${m.roundLine} at a model price of ${price > 0 ? "+" : ""}${price}.`,
+      grade: { side: over ? "over" : "under", line: m.roundLine, segment: "FIGHT" },
     });
   }
   return out;
@@ -953,6 +927,10 @@ export async function runPipeline(runId: number, keys: KeyBag = {}, ownerId: str
     for (const c of allCandidates) {
       const kills: string[] = [];
       if (c.category === "moneyline" && c.odds < -260) kills.push("juice too heavy — no price value on a massive favorite");
+      // Combat prices are the model's own fair numbers, so a heavily juiced
+      // read carries no edge unless a book is far longer. Refuse those.
+      if (c.category.startsWith("fight_") && c.odds < -250)
+        kills.push("model price too short — nothing to beat at this number");
       if (c.signals.includes("SHARP") && c.game.odds && Math.abs(c.game.odds.homeSpread ?? 0) >= 14 && c.category === "spread")
         kills.push("double-digit spread in a variance sport — trap profile");
       if (c.confidence < 54) kills.push("edge below professional threshold");

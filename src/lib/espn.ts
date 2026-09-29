@@ -79,6 +79,8 @@ export interface GameInfo {
     scheduledRounds: number;
     titleFight: boolean;
     cardSegment: string; // "Main Event" | "Main Card" | "Prelims"
+    /** model-derived fair prices — ESPN publishes no MMA lines */
+    model: CombatModel;
   };
 }
 
@@ -96,6 +98,8 @@ export const SPORT_PATHS: Record<string, { label: string; path: string }> = {
 
 /** Combat sports have no spreads/totals — they get their own market model. */
 export const COMBAT_SPORTS = new Set(["ufc", "dwcs", "pfl"]);
+
+import { combatModel, type CombatModel } from "./combat";
 
 const API = "https://site.api.espn.com/apis/site/v2/sports";
 
@@ -512,6 +516,7 @@ function parseBout(bout: any, card: any, sport: string): GameInfo {
       scheduledRounds: rounds,
       titleFight: rounds === 5,
       cardSegment: rounds === 5 ? "Main Card" : "Undercard",
+      model: combatModel(a.record, b.record, String(weight), rounds),
     },
   };
 }
