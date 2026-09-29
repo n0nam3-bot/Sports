@@ -177,8 +177,17 @@ export default function AppShell() {
 
   const cardForDate = useMemo(() => {
     if (activeRun && activeRun.status !== "running") return activeRun;
-    return runsData.find((r) => r.slateDate === date) ?? null;
-  }, [activeRun, runsData, date]);
+    // Match both date AND the currently selected sports so switching from
+    // NHL to DWCS doesn't keep showing the old NHL card.
+    const sportsKey = [...sports].sort().join(",");
+    return (
+      runsData.find((r) => {
+        if (r.slateDate !== date) return false;
+        const rKey = [...(r.sports ?? [])].sort().join(",");
+        return rKey === sportsKey;
+      }) ?? null
+    );
+  }, [activeRun, runsData, date, sports]);
 
   return (
     <div className="relative min-h-screen">
