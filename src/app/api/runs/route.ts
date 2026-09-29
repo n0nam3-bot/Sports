@@ -32,8 +32,30 @@ export async function GET(req: NextRequest) {
     byRun.set(p.runId, arr);
   }
   for (const arr of byRun.values()) arr.sort((a, b) => a.sortOrder - b.sortOrder);
+
+  // Reruns re-select picks that are already staked; show them on that run's
+  // card as "carried" so a repeated run never looks empty.
+  const carriedIds = [...new Set(list.flatMap((r) => r.carried ?? []))];
+  const carriedRows = carriedIds.length
+    ? await db
+        .select()
+        .from(predictions)
+        .where(and(eq(predictions.ownerId, owner), inArray(predictions.id, carriedIds)))
+    : [];
+  const byId = new Map(carriedRows.map((p) => [p.id, p]));
+
   return Response.json({
-    runs: list.map((r) => ({ ...r, predictions: byRun.get(r.id) ?? [] })),
+    runs: list.map((r) => {
+      const fresh = (byRun.get(r.id) ?? []).map((p) => ({ ...p, carried: false }));
+      const carried = (r.carried ?? [])
+        .map((pid) => byId.get(pid))
+        .filter((p): p is (typeof carriedRows)[number] => !!p)
+        .map((p) => ({ ...p, carried: true }));
+      return {
+        ...r,
+        predictions: [...fresh, ...carried].sort((a, b) => b.confidence - a.confidence),
+      };
+    }),
   });
 }
 
