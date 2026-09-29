@@ -73,6 +73,13 @@ export interface GameInfo {
   injuries: InjuryInfo[];
   rest: RestInfo | null;
   leaders: PlayerLeader[];
+  /** combat sports only */
+  combat?: {
+    weightClass: string;
+    scheduledRounds: number;
+    titleFight: boolean;
+    cardSegment: string; // "Main Event" | "Main Card" | "Prelims"
+  };
 }
 
 export const SPORT_PATHS: Record<string, { label: string; path: string }> = {
@@ -82,7 +89,13 @@ export const SPORT_PATHS: Record<string, { label: string; path: string }> = {
   ncaab: { label: "NCAAB", path: "basketball/mens-college-basketball" },
   mlb: { label: "MLB", path: "baseball/mlb" },
   nhl: { label: "NHL", path: "hockey/nhl" },
+  ufc: { label: "UFC", path: "mma/ufc" },
+  dwcs: { label: "DWCS", path: "mma/ufc" }, // ESPN files DWCS under UFC
+  pfl: { label: "PFL", path: "mma/pfl" },
 };
+
+/** Combat sports have no spreads/totals — they get their own market model. */
+export const COMBAT_SPORTS = new Set(["ufc", "dwcs", "pfl"]);
 
 const API = "https://site.api.espn.com/apis/site/v2/sports";
 
@@ -380,6 +393,29 @@ export function parseLeaders(comp: any, home: TeamInfo, away: TeamInfo): PlayerL
       if (perGame != null && range && (perGame < range[0] || perGame > range[1])) {
         perGame = null; // implausible → don't build a prop off it
       }
+      // "15/27, 297 YDS, 4 TD" → touchdown counts ride along with yardage
+      const tdMatch = String(L?.displayValue ?? "").match(/(\d+)\s*TD/i);
+      if (tdMatch && (stat === "PASS_YDS" || stat === "RUSH_YDS" || stat === "REC_YDS")) {
+        const tds = Number(tdMatch[1]);
+        // Early-season TD rates are tiny samples. Regress toward a modest
+        // baseline (0.45/g skill players, 1.4/g passers) with a 4-game prior
+        // so a hot two-week start can't imply a 70% anytime scorer.
+        const priorRate = stat === "PASS_YDS" ? 1.4 : 0.45;
+        const priorGames = 4;
+        const tdPerGame =
+          gp > 0 ? (tds + priorRate * priorGames) / (gp + priorGames) : null;
+        if (tdPerGame != null && tdPerGame > 0 && tdPerGame < 4) {
+          out.push({
+            athlete: ath.displayName,
+            teamAbbr: abbrByTeamId.get(teamId) ?? "",
+            position: ath?.position?.abbreviation ?? "",
+            category: key,
+            stat: stat === "PASS_YDS" ? "PASS_TD" : "ANY_TD",
+            seasonValue: tds,
+            perGame: Math.round(tdPerGame * 100) / 100,
+          });
+        }
+      }
       out.push({
         athlete: ath.displayName,
         teamAbbr: abbrByTeamId.get(teamId) ?? "",
@@ -422,6 +458,83 @@ function parseEvent(evt: any, sport: string): GameInfo {
     rest: null,
     leaders: parseLeaders(comp, home, away),
   };
+}
+
+// ---------- combat sports ----------
+// An MMA "event" is a whole card; each `competition` is one bout. We flatten
+// bouts into individual analyzable games so the cluster prices every fight.
+
+function fighterInfo(c: any, fallbackIdx: number): TeamInfo {
+  const a = c?.athlete ?? {};
+  const full: string = a.displayName ?? a.fullName ?? `Fighter ${fallbackIdx + 1}`;
+  const last = full.split(" ").slice(-1)[0] ?? full;
+  const rec = (c?.records ?? [])[0]?.summary ?? "0-0-0";
+  return {
+    id: String(a.id ?? c?.id ?? fallbackIdx),
+    abbr: last.slice(0, 12).toUpperCase(),
+    name: full,
+    logo: a?.flag?.href ?? a?.headshot ?? "",
+    color: "#1a2233",
+    record: rec,
+    homeRecord: "",
+    awayRecord: "",
+  };
+}
+
+function parseBout(bout: any, card: any, sport: string): GameInfo {
+  const cs: any[] = bout?.competitors ?? [];
+  const a = fighterInfo(cs[0] ?? {}, 0);
+  const b = fighterInfo(cs[1] ?? {}, 1);
+  const st = bout?.status?.type ?? {};
+  const state: "pre" | "in" | "post" =
+    st.state === "in" ? "in" : st.completed || st.state === "post" ? "post" : "pre";
+  const rounds = Number(bout?.format?.regulation?.periods ?? 3) || 3;
+  const weight = bout?.type?.abbreviation ?? bout?.type?.text ?? "Catchweight";
+  const meta = SPORT_PATHS[sport];
+  return {
+    eventId: String(bout.id),
+    sport,
+    sportLabel: meta?.label ?? sport.toUpperCase(),
+    name: `${a.name} vs ${b.name}`,
+    matchup: `${a.abbr} vs ${b.abbr}`,
+    startTime: bout.date ?? card?.date ?? "",
+    status: state,
+    statusDetail: st.shortDetail ?? st.detail ?? "",
+    venue: card?.venues?.[0]?.fullName ?? bout?.venue?.fullName ?? "",
+    home: b,
+    away: a,
+    odds: null, // ESPN's free combat feed carries no betting lines
+    injuries: [],
+    rest: null,
+    leaders: [],
+    combat: {
+      weightClass: String(weight),
+      scheduledRounds: rounds,
+      titleFight: rounds === 5,
+      cardSegment: rounds === 5 ? "Main Card" : "Undercard",
+    },
+  };
+}
+
+/** Flattens every bout on every card that falls on the requested date. */
+function parseCombatCards(events: any[], sport: string, dateISO: string): GameInfo[] {
+  const out: GameInfo[] = [];
+  for (const card of events) {
+    const bouts: any[] = card?.competitions ?? [];
+    for (const bout of bouts) {
+      const when = String(bout?.date ?? card?.date ?? "");
+      // ESPN returns the card under several dates; keep bouts on the target day
+      // (ET calendar day, matching how slates are presented).
+      if (when) {
+        const etDay = new Date(when).toLocaleDateString("en-CA", {
+          timeZone: "America/New_York",
+        });
+        if (etDay !== dateISO) continue;
+      }
+      out.push(parseBout(bout, card, sport));
+    }
+  }
+  return out;
 }
 
 async function scoreboard(sport: string, dateISO: string): Promise<any[]> {
@@ -570,10 +683,15 @@ export async function getSlateDetailed(
 
   // ---- Stage 1 (mandatory): scoreboards, all sports in parallel ----
   const boards = await Promise.all(
-    sports.map(async (sport) => ({
-      sport,
-      games: (await scoreboard(sport, dateISO)).map((evt) => parseEvent(evt, sport)),
-    })),
+    sports.map(async (sport) => {
+      const raw = await scoreboard(sport, dateISO);
+      return {
+        sport,
+        games: COMBAT_SPORTS.has(sport)
+          ? parseCombatCards(raw, sport, dateISO)
+          : raw.map((evt) => parseEvent(evt, sport)),
+      };
+    }),
   );
   const games = boards.flatMap((b) => b.games);
 
@@ -581,10 +699,12 @@ export async function getSlateDetailed(
   if (withRest && left() > 2500) {
     try {
       const restBySport = await Promise.all(
-        boards.map(async (b) => ({
-          sport: b.sport,
-          days: await teamDaysBack(b.sport, dateISO, 3),
-        })),
+        boards
+          .filter((b) => !COMBAT_SPORTS.has(b.sport)) // fighters have camps, not B2Bs
+          .map(async (b) => ({
+            sport: b.sport,
+            days: await teamDaysBack(b.sport, dateISO, 3),
+          })),
       );
       const map = new Map(restBySport.map((r) => [r.sport, r.days]));
       for (const g of games) {
@@ -601,7 +721,7 @@ export async function getSlateDetailed(
   // ---- Stage 3 (optional): injuries, budget-aware ----
   if (withInjuries) {
     const targets = games
-      .filter((g) => g.status === "pre")
+      .filter((g) => g.status === "pre" && !COMBAT_SPORTS.has(g.sport))
       .sort((a, b) => new Date(a.startTime || 0).getTime() - new Date(b.startTime || 0).getTime())
       .slice(0, maxInjury);
     let done = 0;
@@ -651,6 +771,12 @@ export interface FinalScore {
   /** Per-period scoring: quarters / innings / periods, in order. */
   homeLine: number[];
   awayLine: number[];
+  /** combat sports resolution */
+  winnerName?: string;
+  endRound?: number;
+  elapsedMinutes?: number;
+  scheduledRounds?: number;
+  wentDistance?: boolean;
 }
 
 export async function getFinals(
@@ -658,6 +784,44 @@ export async function getFinals(
   sport: string,
 ): Promise<FinalScore[]> {
   const events = await scoreboard(sport, dateISO);
+
+  if (COMBAT_SPORTS.has(sport)) {
+    const out: FinalScore[] = [];
+    for (const card of events) {
+      for (const bout of card?.competitions ?? []) {
+        const st = bout?.status ?? {};
+        const type = st?.type ?? {};
+        const cs: any[] = bout?.competitors ?? [];
+        const a = fighterInfo(cs[0] ?? {}, 0);
+        const b = fighterInfo(cs[1] ?? {}, 1);
+        const winnerC = cs.find((c) => c?.winner === true);
+        const rounds = Number(bout?.format?.regulation?.periods ?? 3) || 3;
+        const endRound = Number(st?.period ?? 0) || 0;
+        // ESPN reports the stoppage time as elapsed within the final round.
+        const clk = String(st?.displayClock ?? "0:00");
+        const [mm, ss] = clk.split(":").map((n) => Number(n) || 0);
+        const elapsed = Math.max(0, (endRound - 1) * 5 + mm + ss / 60);
+        const wentDistance = endRound >= rounds && mm >= 5;
+        out.push({
+          eventId: String(bout.id),
+          status: type.state === "in" ? "in" : type.completed ? "post" : "pre",
+          homeAbbr: b.abbr,
+          awayAbbr: a.abbr,
+          homeScore: winnerC && fighterInfo(winnerC, 1).abbr === b.abbr ? 1 : 0,
+          awayScore: winnerC && fighterInfo(winnerC, 0).abbr === a.abbr ? 1 : 0,
+          homeLine: [],
+          awayLine: [],
+          winnerName: winnerC ? fighterInfo(winnerC, 0).name : undefined,
+          endRound,
+          elapsedMinutes: Math.round(elapsed * 100) / 100,
+          scheduledRounds: rounds,
+          wentDistance,
+        });
+      }
+    }
+    return out;
+  }
+
   return events.map((evt) => {
     const comp = evt?.competitions?.[0] ?? {};
     const cs: any[] = comp.competitors ?? [];
