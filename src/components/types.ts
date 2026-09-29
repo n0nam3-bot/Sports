@@ -21,6 +21,12 @@ export interface GameC {
   home: TeamInfoC; away: TeamInfoC; odds: OddsC | null; injuries: InjuryC[]; rest: RestC | null;
   combat?: {
     weightClass: string; scheduledRounds: number; titleFight: boolean; cardSegment: string;
+    model: {
+      pHome: number; pAway: number; fairHomeML: number; fairAwayML: number;
+      pFinish: number; fairFinish: number; fairDecision: number;
+      expRounds: number; roundLine: number; pRoundsOver: number;
+      fairRoundsOver: number; fairRoundsUnder: number;
+    };
   };
 }
 export interface SlateResp {

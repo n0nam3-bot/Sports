@@ -38,7 +38,7 @@ export default function WarRoom(props: {
   date: string;
   setDate: (d: string) => void;
   sports: string[];
-  allSports: readonly { id: string; label: string }[];
+  allSports: readonly { id: string; label: string; unavailable?: boolean }[];
   toggleSport: (id: string) => void;
   markets: string[];
   setMarkets: (m: string[]) => void;
@@ -92,9 +92,12 @@ export default function WarRoom(props: {
                   <button
                     key={s.id}
                     onClick={() => props.toggleSport(s.id)}
+                    title={s.unavailable ? "no free data feed exists for boxing" : undefined}
                     className={cx(
                       "clip-tag border px-3 py-2.5 font-mono text-[11px] font-bold tracking-[0.14em] transition-all",
-                      on
+                      s.unavailable
+                        ? "cursor-not-allowed border-white/8 bg-white/[0.015] text-[#2f3b4d] line-through"
+                        : on
                         ? "border-[#9d7bff]/45 bg-[#9d7bff]/14 text-[#9d7bff] shadow-[0_0_12px_-3px_rgba(157,123,255,0.5)]"
                         : "border-white/10 bg-white/[0.03] text-[#5f7089] hover:border-white/25 hover:text-[#8fa3bd]",
                     )}
@@ -326,11 +329,18 @@ export default function WarRoom(props: {
       )}
 
       {council && predictions.length === 0 && card?.status === "completed" && (
-        <Panel className="rise flex items-center gap-3 p-5">
-          <Ban className="h-5 w-5 text-[#ffb020]" />
+        <Panel className="rise flex items-start gap-3 p-5">
+          <Ban className="mt-0.5 h-5 w-5 shrink-0 text-[#ffb020]" />
           <div>
             <div className="font-display text-lg font-bold">{council.headline}</div>
             <div className="text-[13px] text-[#8fa3bd]">{council.memo}</div>
+            {props.sports.some((s) => ["ufc", "dwcs", "pfl"].includes(s)) && (
+              <div className="mt-2 text-[12px] leading-relaxed text-[#5f7089]">
+                Prospect cards like DWCS routinely match undefeated fighters against each other, so the
+                model lands near a coin-flip and correctly declines to force a side. Round and method
+                angles are still shown on each bout above.
+              </div>
+            )}
           </div>
         </Panel>
       )}
@@ -472,29 +482,60 @@ function GameCard({ g }: { g: GameC }) {
                 {t.record}{away && t.awayRecord ? ` · road ${t.awayRecord}` : ""}{!away && t.homeRecord ? ` · home ${t.homeRecord}` : ""}
               </div>
             </div>
-            {ml != null && (
+            {g.combat ? (
+              (() => {
+                const fm = away ? g.combat.model.fairAwayML : g.combat.model.fairHomeML;
+                const pr = away ? g.combat.model.pAway : g.combat.model.pHome;
+                return (
+                  <span className="text-right">
+                    <span className={cx("block font-mono text-[12px] font-bold", fm < 0 ? "text-[#37ff8b]" : "text-[#8fa3bd]")}>
+                      {fm > 0 ? `+${fm}` : fm}
+                    </span>
+                    <span className="block font-mono text-[8.5px] uppercase tracking-[0.1em] text-[#3d4c63]">
+                      {(pr * 100).toFixed(0)}% model
+                    </span>
+                  </span>
+                );
+              })()
+            ) : ml != null ? (
               <span className={cx("font-mono text-[12px] font-bold", ml < 0 ? "text-[#37ff8b]" : "text-[#8fa3bd]")}>
                 {ml > 0 ? `+${ml}` : ml}
               </span>
-            )}
+            ) : null}
           </div>
         ))}
       </div>
 
       {/* market strip */}
       {g.combat ? (
-        <div className="mt-3 grid grid-cols-2 gap-1.5 border-t border-white/6 pt-3 font-mono text-center">
-          <div className="rounded bg-white/[0.03] px-1 py-1.5">
-            <div className="text-[8.5px] uppercase tracking-[0.18em] text-[#3d4c63]">division</div>
-            <div className="text-[11px] font-bold text-[#ff3d81]">{g.combat.weightClass}</div>
-          </div>
-          <div className="rounded bg-white/[0.03] px-1 py-1.5">
-            <div className="text-[8.5px] uppercase tracking-[0.18em] text-[#3d4c63]">scheduled</div>
-            <div className="text-[11px] font-bold text-[#9d7bff]">
-              {g.combat.scheduledRounds} rounds{g.combat.titleFight ? " · main" : ""}
+        <>
+          <div className="mt-3 grid grid-cols-4 gap-1.5 border-t border-white/6 pt-3 font-mono text-center">
+            <div className="rounded bg-white/[0.03] px-1 py-1.5">
+              <div className="text-[8.5px] uppercase tracking-[0.18em] text-[#3d4c63]">division</div>
+              <div className="text-[10px] font-bold text-[#ff3d81]">{g.combat.weightClass}</div>
+            </div>
+            <div className="rounded bg-white/[0.03] px-1 py-1.5">
+              <div className="text-[8.5px] uppercase tracking-[0.18em] text-[#3d4c63]">rounds</div>
+              <div className="text-[10px] font-bold text-[#9d7bff]">{g.combat.scheduledRounds}</div>
+            </div>
+            <div className="rounded bg-white/[0.03] px-1 py-1.5" title="model price that the fight ends inside the distance">
+              <div className="text-[8.5px] uppercase tracking-[0.18em] text-[#3d4c63]">finish</div>
+              <div className="text-[10px] font-bold text-[#37ff8b]">
+                {g.combat.model.fairFinish > 0 ? `+${g.combat.model.fairFinish}` : g.combat.model.fairFinish}
+              </div>
+            </div>
+            <div className="rounded bg-white/[0.03] px-1 py-1.5" title="model price on the round total">
+              <div className="text-[8.5px] uppercase tracking-[0.18em] text-[#3d4c63]">o{g.combat.model.roundLine} rds</div>
+              <div className="text-[10px] font-bold text-[#39d5ff]">
+                {g.combat.model.fairRoundsOver > 0 ? `+${g.combat.model.fairRoundsOver}` : g.combat.model.fairRoundsOver}
+              </div>
             </div>
           </div>
-        </div>
+          <div className="mt-1.5 flex items-center gap-1 font-mono text-[8.5px] uppercase tracking-[0.14em] text-[#5f7089]">
+            <Gauge className="h-3 w-3 text-[#ffb020]" />
+            model prices — no sportsbook publishes MMA lines on the free feed
+          </div>
+        </>
       ) : (
       <div className="mt-3 grid grid-cols-3 gap-1.5 border-t border-white/6 pt-3 font-mono text-center">
         <div className="rounded bg-white/[0.03] px-1 py-1.5">

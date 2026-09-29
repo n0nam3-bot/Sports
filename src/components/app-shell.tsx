@@ -23,6 +23,9 @@ const ALL_SPORTS = [
   { id: "ufc", label: "UFC" },
   { id: "dwcs", label: "DWCS" },
   { id: "pfl", label: "PFL" },
+  // No free feed publishes bout-level boxing data (ESPN returns
+  // "Invalid sport (boxing)"), so it is shown as unavailable rather than faked.
+  { id: "boxing", label: "BOXING", unavailable: true },
 ];
 
 function etToday(): string {
@@ -159,6 +162,10 @@ export default function AppShell() {
   }, [flash, loadRuns, loadAgents]);
 
   const toggleSport = (id: string) => {
+    if (ALL_SPORTS.find((s) => s.id === id)?.unavailable) {
+      flash("boxing has no free bout-level data feed — no schedule, records or results to grade. it stays off until a free source exists.");
+      return;
+    }
     setSports((cur) => {
       if (cur.includes(id)) return cur.length === 1 ? cur : cur.filter((s) => s !== id);
       return [...cur, id];
