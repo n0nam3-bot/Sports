@@ -1,6 +1,7 @@
 import { ensureSchema } from "@/lib/schema";
 import { ensureAgentsSeeded, listAgents } from "@/lib/agents";
 import { db } from "@/db";
+import { ownerFromRequest } from "@/lib/owner";
 import { runs } from "@/db/schema";
 import { sql } from "drizzle-orm";
 
@@ -8,11 +9,11 @@ export const dynamic = "force-dynamic";
 
 // One-tap installer: open /api/setup in any browser after pointing the app at
 // a fresh Postgres. Creates tables (idempotent) and seeds the agent roster.
-export async function GET() {
+export async function GET(req: Request) {
   try {
     await ensureSchema();
-    await ensureAgentsSeeded();
-    const roster = await listAgents();
+    await ensureAgentsSeeded(ownerFromRequest(req));
+    const roster = await listAgents(ownerFromRequest(req));
     const [{ count }] = await db
       .select({ count: sql<number>`count(*)::int` })
       .from(runs);
