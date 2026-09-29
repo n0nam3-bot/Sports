@@ -107,6 +107,15 @@ export const runs = pgTable("runs", {
     .$type<TraceEntry[]>()
     .notNull()
     .default(sql`'[]'::jsonb`),
+  /**
+   * Prediction ids re-selected by this run that were already staked earlier.
+   * They are displayed as part of this run's card but graded only once, on
+   * the run that first released them.
+   */
+  carried: jsonb("carried")
+    .$type<number[]>()
+    .notNull()
+    .default(sql`'[]'::jsonb`),
   council: jsonb("council")
     .$type<CouncilDecision>()
     .notNull()
