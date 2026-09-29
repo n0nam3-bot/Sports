@@ -44,11 +44,12 @@ export interface PredC {
   category: string; pick: string; lineLabel: string; odds: number; units: number;
   confidence: number; edge: number; agents: string[]; reasoning: string;
   outcome: string; finalScore: string | null; gradedAt: string | null;
+  carried?: boolean;
 }
 export interface RunC {
   id: number; slateDate: string; sports: string[]; markets?: string[]; status: string; mode: string;
   gamesFound: number; gamesAnalyzed: number; gamesSkipped: number;
-  trace: TraceC[]; council: CouncilC; createdAt: string; completedAt: string | null;
+  trace: TraceC[]; council: CouncilC; carried?: number[]; createdAt: string; completedAt: string | null;
   predictions: PredC[];
 }
 

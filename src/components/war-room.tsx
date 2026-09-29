@@ -406,7 +406,17 @@ function BetCard({ rank, p }: { rank: number; p: PredC }) {
           <CategoryChip category={p.category} />
           <div className="mt-1 truncate font-display text-[15px] font-bold leading-snug text-[#e8f1fb]">{p.pick}</div>
         </div>
-        <OutcomeChip outcome={p.outcome} />
+        <div className="flex flex-col items-end gap-1">
+          <OutcomeChip outcome={p.outcome} />
+          {p.carried && (
+            <span
+              className="clip-tag border border-[#39d5ff]/25 bg-[#39d5ff]/8 px-1.5 py-px font-mono text-[8px] font-bold uppercase tracking-[0.12em] text-[#7fd4f5]"
+              title="already staked on an earlier run — shown here but graded once"
+            >
+              already staked
+            </span>
+          )}
+        </div>
       </div>
 
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-[10.5px] uppercase tracking-[0.12em] text-[#5f7089]">
