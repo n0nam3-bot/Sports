@@ -4,10 +4,11 @@ import { useEffect, useRef } from "react";
 import {
   Activity, Ban, Brain, CalendarDays, CheckCircle2, CircleDot, Cpu, Flame,
   Gauge, Loader2, Lock, Play, RefreshCw, ShieldAlert, Siren, Sparkles, Ticket,
-  TrendingUp, Users2, XOctagon, Repeat,
+  TrendingUp, Users2, XOctagon, Repeat, SlidersHorizontal, Shuffle,
 } from "lucide-react";
 import type { GameC, PredC, RunC, SlateResp } from "./types";
 import { CategoryChip, Chip, ConfBar, NeonButton, OutcomeChip, Panel, TeamMark, cx } from "./ui";
+import { MARKET_OPTIONS, optionsForSports } from "@/lib/markets";
 
 const LAYER_DOT: Record<string, string> = {
   scout: "#39d5ff",
@@ -39,6 +40,8 @@ export default function WarRoom(props: {
   sports: string[];
   allSports: readonly { id: string; label: string }[];
   toggleSport: (id: string) => void;
+  markets: string[];
+  setMarkets: (m: string[]) => void;
   slate: SlateResp | null;
   slateLoading: boolean;
   slateError?: string | null;
@@ -101,6 +104,58 @@ export default function WarRoom(props: {
                 );
               })}
             </div>
+          </div>
+
+          <div className="w-full">
+            <label className="mb-1.5 flex flex-wrap items-center gap-1.5 font-mono text-[10px] font-bold uppercase tracking-[0.22em] text-[#5f7089]">
+              <SlidersHorizontal className="h-3.5 w-3.5 text-[#ffb020]" /> market focus
+              <span className="normal-case tracking-normal text-[#3d4c63]">
+                — leave on mixed for a balanced card, or pick exactly what you want to bet
+              </span>
+            </label>
+            <div className="flex flex-wrap gap-1.5">
+              <button
+                onClick={() => props.setMarkets([])}
+                className={cx(
+                  "clip-tag flex items-center gap-1.5 border px-3 py-2 font-mono text-[10.5px] font-bold uppercase tracking-[0.12em] transition-all",
+                  props.markets.length === 0
+                    ? "border-[#37ff8b]/45 bg-[#37ff8b]/14 text-[#37ff8b] shadow-[0_0_12px_-3px_rgba(55,255,139,0.5)]"
+                    : "border-white/10 bg-white/[0.03] text-[#5f7089] hover:border-white/25 hover:text-[#8fa3bd]",
+                )}
+              >
+                <Shuffle className="h-3.5 w-3.5" /> mixed (default)
+              </button>
+              {optionsForSports(props.sports).map((m) => {
+                const on = props.markets.includes(m.id);
+                return (
+                  <button
+                    key={m.id}
+                    title={m.hint}
+                    onClick={() =>
+                      props.setMarkets(
+                        on
+                          ? props.markets.filter((x) => x !== m.id)
+                          : [...props.markets, m.id],
+                      )
+                    }
+                    className={cx(
+                      "clip-tag border px-3 py-2 font-mono text-[10.5px] font-bold uppercase tracking-[0.12em] transition-all",
+                      on
+                        ? "border-[#ffb020]/50 bg-[#ffb020]/14 text-[#ffb020] shadow-[0_0_12px_-3px_rgba(255,176,32,0.5)]"
+                        : "border-white/10 bg-white/[0.03] text-[#5f7089] hover:border-white/25 hover:text-[#8fa3bd]",
+                    )}
+                  >
+                    {m.label}
+                  </button>
+                );
+              })}
+            </div>
+            {props.markets.length > 0 && (
+              <p className="mt-1.5 font-mono text-[9.5px] uppercase tracking-[0.14em] text-[#ffc966]">
+                focused card — the council will only release {props.markets.length} selected market
+                {props.markets.length === 1 ? "" : "s"} and will pass entirely if none carry an edge
+              </p>
+            )}
           </div>
 
           <div className="mb-0.5 ml-auto flex flex-wrap items-center gap-2.5">
@@ -401,7 +456,13 @@ function GameCard({ g }: { g: GameC }) {
           { t: g.home, ml: o?.homeML, rest: homeRest, away: false },
         ].map(({ t, ml, rest, away }) => (
           <div key={t.abbr + away} className="flex items-center gap-3">
-            <TeamMark src={t.logo} abbr={t.abbr} size={38} />
+            {g.combat ? (
+              <span className="flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-full border border-[#ff3d81]/25 bg-[#ff3d81]/8 font-mono text-[10px] font-bold text-[#ff3d81]">
+                {away ? "A" : "B"}
+              </span>
+            ) : (
+              <TeamMark src={t.logo} abbr={t.abbr} size={38} />
+            )}
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
                 <span className="truncate font-display text-[14.5px] font-bold text-[#e8f1fb]">{t.name}</span>
@@ -421,6 +482,20 @@ function GameCard({ g }: { g: GameC }) {
       </div>
 
       {/* market strip */}
+      {g.combat ? (
+        <div className="mt-3 grid grid-cols-2 gap-1.5 border-t border-white/6 pt-3 font-mono text-center">
+          <div className="rounded bg-white/[0.03] px-1 py-1.5">
+            <div className="text-[8.5px] uppercase tracking-[0.18em] text-[#3d4c63]">division</div>
+            <div className="text-[11px] font-bold text-[#ff3d81]">{g.combat.weightClass}</div>
+          </div>
+          <div className="rounded bg-white/[0.03] px-1 py-1.5">
+            <div className="text-[8.5px] uppercase tracking-[0.18em] text-[#3d4c63]">scheduled</div>
+            <div className="text-[11px] font-bold text-[#9d7bff]">
+              {g.combat.scheduledRounds} rounds{g.combat.titleFight ? " · main" : ""}
+            </div>
+          </div>
+        </div>
+      ) : (
       <div className="mt-3 grid grid-cols-3 gap-1.5 border-t border-white/6 pt-3 font-mono text-center">
         <div className="rounded bg-white/[0.03] px-1 py-1.5">
           <div className="text-[8.5px] uppercase tracking-[0.18em] text-[#3d4c63]">spread</div>
@@ -437,6 +512,7 @@ function GameCard({ g }: { g: GameC }) {
           </div>
         </div>
       </div>
+      )}
 
       {/* injuries */}
       {g.injuries.length > 0 && (

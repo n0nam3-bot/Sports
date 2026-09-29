@@ -11,6 +11,7 @@ import { loadVault, vaultActive, vaultFetch, EMPTY_VAULT, type KeyVault } from "
 import WarRoom from "./war-room";
 import AgentsView from "./agents-view";
 import RunsView from "./runs-view";
+import { RELEASE_LABEL } from "@/lib/release";
 
 const ALL_SPORTS = [
   { id: "nba", label: "NBA" },
@@ -19,6 +20,9 @@ const ALL_SPORTS = [
   { id: "ncaab", label: "NCAAB" },
   { id: "mlb", label: "MLB" },
   { id: "nhl", label: "NHL" },
+  { id: "ufc", label: "UFC" },
+  { id: "dwcs", label: "DWCS" },
+  { id: "pfl", label: "PFL" },
 ];
 
 function etToday(): string {
@@ -41,6 +45,7 @@ export default function AppShell() {
   const [clock, setClock] = useState("");
   const [vault, setVault] = useState<KeyVault>(EMPTY_VAULT);
   const [keysOpen, setKeysOpen] = useState(false);
+  const [markets, setMarkets] = useState<string[]>([]);
   const activeIdRef = useRef<number | null>(null);
   activeIdRef.current = activeId;
 
@@ -128,7 +133,7 @@ export default function AppShell() {
         {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ date, sports }),
+          body: JSON.stringify({ date, sports, markets }),
         },
         vault,
       );
@@ -142,7 +147,7 @@ export default function AppShell() {
     } finally {
       setLaunching(false);
     }
-  }, [date, sports, flash, vault]);
+  }, [date, sports, markets, flash, vault]);
 
   const grade = useCallback(async () => {
     const res = await fetch("/api/grade", { method: "POST" });
@@ -186,6 +191,9 @@ export default function AppShell() {
               </div>
               <div className="font-mono text-[9px] uppercase tracking-[0.32em] text-[#5f7089]">
                 agent cluster // betting intel
+              </div>
+              <div className="mt-1 font-mono text-[8px] uppercase tracking-[0.16em] text-[#37ff8b]/70">
+                {RELEASE_LABEL}
               </div>
             </div>
           </div>
@@ -307,6 +315,8 @@ export default function AppShell() {
             sports={sports}
             allSports={ALL_SPORTS}
             toggleSport={toggleSport}
+            markets={markets}
+            setMarkets={setMarkets}
             slate={slate}
             slateLoading={slateLoading}
             slateError={slateError}
