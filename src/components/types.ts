@@ -19,15 +19,6 @@ export interface GameC {
   eventId: string; sport: string; sportLabel: string; name: string; matchup: string;
   startTime: string; status: "pre" | "in" | "post"; statusDetail: string; venue: string;
   home: TeamInfoC; away: TeamInfoC; odds: OddsC | null; injuries: InjuryC[]; rest: RestC | null;
-  combat?: {
-    weightClass: string; scheduledRounds: number; titleFight: boolean; cardSegment: string;
-    model: {
-      pHome: number; pAway: number; fairHomeML: number; fairAwayML: number;
-      pFinish: number; fairFinish: number; fairDecision: number;
-      expRounds: number; roundLine: number; pRoundsOver: number;
-      fairRoundsOver: number; fairRoundsUnder: number;
-    };
-  };
 }
 export interface SlateResp {
   date: string; sports: string[]; games: GameC[]; providers: string[];
@@ -44,12 +35,11 @@ export interface PredC {
   category: string; pick: string; lineLabel: string; odds: number; units: number;
   confidence: number; edge: number; agents: string[]; reasoning: string;
   outcome: string; finalScore: string | null; gradedAt: string | null;
-  carried?: boolean;
 }
 export interface RunC {
-  id: number; slateDate: string; sports: string[]; markets?: string[]; status: string; mode: string;
+  id: number; slateDate: string; sports: string[]; status: string; mode: string;
   gamesFound: number; gamesAnalyzed: number; gamesSkipped: number;
-  trace: TraceC[]; council: CouncilC; carried?: number[]; createdAt: string; completedAt: string | null;
+  trace: TraceC[]; council: CouncilC; createdAt: string; completedAt: string | null;
   predictions: PredC[];
 }
 

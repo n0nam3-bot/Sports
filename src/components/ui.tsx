@@ -129,9 +129,6 @@ const CATEGORY_META: Record<string, { label: string; tone: string }> = {
   p1_total: { label: "1ST PERIOD", tone: "violet" },
   f5_total: { label: "F5 INNINGS", tone: "amber" },
   nrfi: { label: "NRFI / YRFI", tone: "magenta" },
-  fight_ml: { label: "FIGHT WINNER", tone: "green" },
-  fight_method: { label: "METHOD", tone: "magenta" },
-  fight_rounds: { label: "ROUND TOTAL", tone: "violet" },
 };
 
 export function CategoryChip({ category }: { category: string }) {

@@ -11,7 +11,6 @@ import { loadVault, vaultActive, vaultFetch, EMPTY_VAULT, type KeyVault } from "
 import WarRoom from "./war-room";
 import AgentsView from "./agents-view";
 import RunsView from "./runs-view";
-import { RELEASE_LABEL } from "@/lib/release";
 
 const ALL_SPORTS = [
   { id: "nba", label: "NBA" },
@@ -20,12 +19,6 @@ const ALL_SPORTS = [
   { id: "ncaab", label: "NCAAB" },
   { id: "mlb", label: "MLB" },
   { id: "nhl", label: "NHL" },
-  { id: "ufc", label: "UFC" },
-  { id: "dwcs", label: "DWCS" },
-  { id: "pfl", label: "PFL" },
-  // No free feed publishes bout-level boxing data (ESPN returns
-  // "Invalid sport (boxing)"), so it is shown as unavailable rather than faked.
-  { id: "boxing", label: "BOXING", unavailable: true },
 ];
 
 function etToday(): string {
@@ -48,7 +41,6 @@ export default function AppShell() {
   const [clock, setClock] = useState("");
   const [vault, setVault] = useState<KeyVault>(EMPTY_VAULT);
   const [keysOpen, setKeysOpen] = useState(false);
-  const [markets, setMarkets] = useState<string[]>([]);
   const activeIdRef = useRef<number | null>(null);
   activeIdRef.current = activeId;
 
@@ -136,7 +128,7 @@ export default function AppShell() {
         {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ date, sports, markets }),
+          body: JSON.stringify({ date, sports }),
         },
         vault,
       );
@@ -150,7 +142,7 @@ export default function AppShell() {
     } finally {
       setLaunching(false);
     }
-  }, [date, sports, markets, flash, vault]);
+  }, [date, sports, flash, vault]);
 
   const grade = useCallback(async () => {
     const res = await fetch("/api/grade", { method: "POST" });
@@ -162,10 +154,6 @@ export default function AppShell() {
   }, [flash, loadRuns, loadAgents]);
 
   const toggleSport = (id: string) => {
-    if (ALL_SPORTS.find((s) => s.id === id)?.unavailable) {
-      flash("boxing has no free bout-level data feed — no schedule, records or results to grade. it stays off until a free source exists.");
-      return;
-    }
     setSports((cur) => {
       if (cur.includes(id)) return cur.length === 1 ? cur : cur.filter((s) => s !== id);
       return [...cur, id];
@@ -177,17 +165,8 @@ export default function AppShell() {
 
   const cardForDate = useMemo(() => {
     if (activeRun && activeRun.status !== "running") return activeRun;
-    // Match both date AND the currently selected sports so switching from
-    // NHL to DWCS doesn't keep showing the old NHL card.
-    const sportsKey = [...sports].sort().join(",");
-    return (
-      runsData.find((r) => {
-        if (r.slateDate !== date) return false;
-        const rKey = [...(r.sports ?? [])].sort().join(",");
-        return rKey === sportsKey;
-      }) ?? null
-    );
-  }, [activeRun, runsData, date, sports]);
+    return runsData.find((r) => r.slateDate === date) ?? null;
+  }, [activeRun, runsData, date]);
 
   return (
     <div className="relative min-h-screen">
@@ -207,9 +186,6 @@ export default function AppShell() {
               </div>
               <div className="font-mono text-[9px] uppercase tracking-[0.32em] text-[#5f7089]">
                 agent cluster // betting intel
-              </div>
-              <div className="mt-1 font-mono text-[8px] uppercase tracking-[0.16em] text-[#37ff8b]/70">
-                {RELEASE_LABEL}
               </div>
             </div>
           </div>
@@ -331,8 +307,6 @@ export default function AppShell() {
             sports={sports}
             allSports={ALL_SPORTS}
             toggleSport={toggleSport}
-            markets={markets}
-            setMarkets={setMarkets}
             slate={slate}
             slateLoading={slateLoading}
             slateError={slateError}
