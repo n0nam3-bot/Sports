@@ -1,7 +1,6 @@
 # NEONSLIP — Agent Cluster Betting Intelligence
 
-A hierarchical swarm of AI agents that tears apart any sports slate
-(NBA / NFL / NCAAF / NCAAB / MLB / NHL / UFC / PFL)
+A hierarchical swarm of AI agents that tears apart any sports slate (NBA / NFL / NCAAF / NCAAB / MLB / NHL)
 and produces a council-approved **Top-10 slip** for the selected date. Dark, neon, gamer/capper UI.
 Games that already started or finished are never analyzed — the cluster auto-skips them.
 
@@ -17,23 +16,6 @@ Games that already started or finished are never analyzed — the cluster auto-s
 Every slip is graded against final scores. Rating points flow to/from every agent that stamped a bet.
 An agent below a 45.5% strike rate is forced to **rewrite its own playbook prompt** (visible in the
 Roster tab under *self-corrections*). Operators can also hand-tune any prompt.
-
-## Markets
-
-**Team sports:** spreads · moneylines · game totals · team totals · 1st half spread & total ·
-1st quarter / 1st period totals · F5 innings · NRFI/YRFI · player props
-(passing / rushing / receiving yards, points, rebounds, assists, goals, shots, anytime & passing TDs).
-
-**Combat sports (UFC / PFL):** fight winner · method of victory (finish vs decision) · round totals.
-ESPN's free feed publishes no betting lines for MMA, so those prices are the model's own fair
-numbers — shop them against your book. Boxing and DWCS are not exposed by any free feed, so they
-are deliberately absent rather than faked.
-
-### Market focus
-The slate runs **mixed** by default (a balanced card across families). Users can instead select
-exactly what they want — e.g. *NFL + Rushing Yards only*, *NFL + Touchdowns only*, or
-*UFC + Round Totals only*. Focused runs drop the diversity quotas and let the council fill the
-card entirely from the chosen markets, and pass altogether if none carry an edge.
 
 ## Brains — 100% free tiers
 
