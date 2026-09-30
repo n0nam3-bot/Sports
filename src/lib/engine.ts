@@ -9,7 +9,6 @@ import {
 } from "@/db/schema";
 import { and, desc, eq, inArray, lt, ne, sql as dsql } from "drizzle-orm";
 import {
-  COMBAT_SPORTS,
   getFinals,
   getSlateDetailed,
   lookupPlayerStat,
@@ -19,7 +18,6 @@ import { llmJson, targetFor, type KeyBag } from "./llm";
 import { ensureAgentsSeeded, settleAgentRatings } from "./agents";
 import { ensureSchema } from "./schema";
 import { HOUSE } from "./owner";
-import { allowsCandidate, buildFilter, type MarketFilter } from "./markets";
 
 export const revalidate = 0;
 
@@ -211,81 +209,11 @@ function mlFair(margin: number, sport: string): number {
   return Math.round(((1 - p) / p) * 100);
 }
 
-function combatCandidates(g: GameInfo, nextId: () => number): Candidate[] {
-  const c = g.combat;
-  if (!c) return [];
-  const m = c.model;
-  const out: Candidate[] = [];
-  const favHome = m.pHome >= 0.5;
-  const pFav = Math.max(m.pHome, m.pAway);
-  const fav = favHome ? g.home : g.away;
-  const dog = favHome ? g.away : g.home;
-  const favPrice = favHome ? m.fairHomeML : m.fairAwayML;
-  const priceTag = `${favPrice > 0 ? "+" : ""}${favPrice}`;
-
-  // ---- winner ----
-  // DWCS/PFL prospect fights are frequently near coin-flips; only a real
-  // separation in record strength earns a side.
-  if (pFav >= 0.53) {
-    out.push({
-      id: nextId(), game: g, category: "fight_ml",
-      pick: `${fav.name} to win`,
-      lineLabel: `model ${priceTag}`,
-      odds: favPrice,
-      edge: (pFav - 0.5) * 100,
-      confidence: Math.min(66, 52 + (pFav - 0.5) * 52 + jitter(g.eventId + "fml")),
-      signals: ["QUANT", "MATCHUP"],
-      thesis: `${fav.name} (${fav.record}) vs ${dog.name} (${dog.record}) at ${c.weightClass}. Record strength and experience depth make ${fav.name} a ${(pFav * 100).toFixed(0)}% favourite — model fair price ${priceTag}. No sportsbook line exists on the free feed, so only bet this if your book is longer than ${priceTag}.`,
-      grade: { side: favHome ? "home" : "away", line: null },
-    });
-  }
-
-  // ---- method: finish vs decision ----
-  if (Math.abs(m.pFinish - 0.5) >= 0.03) {
-    const finish = m.pFinish > 0.5;
-    const price = finish ? m.fairFinish : m.fairDecision;
-    out.push({
-      id: nextId(), game: g, category: "fight_method",
-      pick: finish
-        ? `${g.away.abbr} vs ${g.home.abbr} — does NOT go the distance`
-        : `${g.away.abbr} vs ${g.home.abbr} — GOES the distance`,
-      lineLabel: finish ? "inside the distance" : "decision",
-      odds: price,
-      edge: Math.abs(m.pFinish - 0.5) * 100,
-      confidence: Math.min(62, 52 + Math.abs(m.pFinish - 0.5) * 42 + jitter(g.eventId + "fm")),
-      signals: ["MATCHUP", "PROPS"],
-      thesis: `${c.weightClass}${c.scheduledRounds === 5 ? " (5-round)" : ""}. Division finishing tendencies and the skill gap model a ${(m.pFinish * 100).toFixed(0)}% stoppage chance, favouring ${finish ? "an early finish" : "the scorecards"} at a model price of ${price > 0 ? "+" : ""}${price}.`,
-      grade: { side: finish ? "under" : "over", line: c.scheduledRounds, segment: "FIGHT" },
-    });
-  }
-
-  // ---- round totals ----
-  if (Math.abs(m.pRoundsOver - 0.5) >= 0.03) {
-    const over = m.pRoundsOver > 0.5;
-    const price = over ? m.fairRoundsOver : m.fairRoundsUnder;
-    out.push({
-      id: nextId(), game: g, category: "fight_rounds",
-      pick: `${g.away.abbr} vs ${g.home.abbr} — ${over ? "over" : "under"} ${m.roundLine} rounds`,
-      lineLabel: `${over ? "o" : "u"}${m.roundLine} rounds`,
-      odds: price,
-      edge: Math.abs(m.pRoundsOver - 0.5) * 100,
-      confidence: Math.min(60, 52 + Math.abs(m.pRoundsOver - 0.5) * 34 + jitter(g.eventId + "fr")),
-      signals: ["MATCHUP", "PROPS"],
-      thesis: `Model expects about ${m.expRounds.toFixed(1)} completed rounds in this ${c.scheduledRounds}-rounder (${(m.pFinish * 100).toFixed(0)}% stoppage risk), landing ${over ? "beyond" : "short of"} ${m.roundLine} at a model price of ${price > 0 ? "+" : ""}${price}.`,
-      grade: { side: over ? "over" : "under", line: m.roundLine, segment: "FIGHT" },
-    });
-  }
-  return out;
-}
-
 function candidatesFor(g: GameInfo, nextId: () => number): {
   cands: Candidate[];
   model: ModelOut;
 } {
   const model = buildModel(g);
-  if (COMBAT_SPORTS.has(g.sport)) {
-    return { cands: combatCandidates(g, nextId), model };
-  }
   const cands: Candidate[] = [];
   const o = g.odds;
   const mk = (
@@ -576,57 +504,6 @@ function candidatesFor(g: GameInfo, nextId: () => number): {
   // ---------------- player props from real season production ----------------
   for (const L of g.leaders) {
     if (L.perGame == null || !L.teamAbbr) continue;
-
-    // touchdown markets are priced as probabilities, not yardage lines
-    if (L.stat === "ANY_TD" || L.stat === "PASS_TD") {
-      const isHomeTd = L.teamAbbr === g.home.abbr;
-      const spreadTd = o?.homeSpread ?? 0;
-      const favMarginTd = isHomeTd ? -spreadTd : spreadTd;
-      // favourites find the end zone more often
-      const lambda = Math.max(0.05, L.perGame * (1 + favMarginTd * 0.022));
-      if (L.stat === "ANY_TD") {
-        const pScore = 1 - Math.exp(-lambda);
-        if (pScore >= 0.5) {
-          const rawFair = pScore >= 0.5 ? -Math.round((pScore / (1 - pScore)) * 100) : 100;
-          // books shade anytime-TD prices; never quote beyond a realistic range
-          const fair = Math.max(-190, rawFair);
-          cands.push(
-            mk(
-              "player_prop",
-              `${L.athlete} anytime touchdown`,
-              "anytime TD",
-              fair,
-              (pScore - 0.5) * 100,
-              Math.min(60, 53 + (pScore - 0.5) * 34 + jitter(g.eventId + L.athlete + "td")),
-              `${L.athlete} (${L.teamAbbr}) is finding the end zone ${L.perGame} times per game. Game script ${favMarginTd > 0 ? "as a favourite" : "as an underdog"} models a ${(pScore * 100).toFixed(0)}% chance of a touchdown.`,
-              { side: "team_over", line: 0.5, player: L.athlete, stat: "ANY_TD", teamAbbr: L.teamAbbr },
-              ["PROPS"],
-            ),
-          );
-        }
-      } else {
-        const lineTd = lambda >= 1.9 ? 1.5 : 0.5;
-        const pOver = 1 - poissonCdf(lineTd, lambda);
-        if (Math.abs(pOver - 0.5) >= 0.06) {
-          const over = pOver > 0.5;
-          cands.push(
-            mk(
-              "player_prop",
-              `${L.athlete} ${over ? "over" : "under"} ${lineTd} passing TDs`,
-              `${over ? "o" : "u"}${lineTd} pass TD`,
-              -115,
-              Math.abs(pOver - 0.5) * 100,
-              Math.min(60, 53 + Math.abs(pOver - 0.5) * 34 + jitter(g.eventId + L.athlete + "ptd")),
-              `${L.athlete} averages ${L.perGame} passing touchdowns per game; model lands at ${lambda.toFixed(2)} expected against this matchup — ${(pOver * 100).toFixed(0)}% to clear ${lineTd}.`,
-              { side: over ? "team_over" : "team_under", line: lineTd, player: L.athlete, stat: "PASS_TD", teamAbbr: L.teamAbbr },
-              ["PROPS"],
-            ),
-          );
-        }
-      }
-      continue;
-    }
-
     const isHome = L.teamAbbr === g.home.abbr;
     const spread = o?.homeSpread ?? 0;
     // Game script: favorites run more, underdogs throw more.
@@ -668,18 +545,6 @@ function candidatesFor(g: GameInfo, nextId: () => number): {
   }
 
   return { cands, model };
-}
-
-/** P(X <= k) for a Poisson with mean lambda — used for TD markets. */
-function poissonCdf(k: number, lambda: number): number {
-  const kk = Math.floor(k);
-  let term = Math.exp(-lambda);
-  let sum = term;
-  for (let i = 1; i <= kk; i++) {
-    term *= lambda / i;
-    sum += term;
-  }
-  return Math.min(1, sum);
 }
 
 function fmtLine(v: number): string {
@@ -786,23 +651,10 @@ export async function runPipeline(runId: number, keys: KeyBag = {}, ownerId: str
     let candId = 1;
     const models = new Map<string, ModelOut>();
     const allCandidates: Candidate[] = [];
-    const filter: MarketFilter = buildFilter(run.markets);
-    let filteredOut = 0;
     for (const g of pre) {
       const { cands, model } = candidatesFor(g, () => candId++);
       models.set(g.eventId, model);
-      for (const c of cands) {
-        if (allowsCandidate(filter, c.category, c.grade.stat)) allCandidates.push(c);
-        else filteredOut++;
-      }
-    }
-    if (!filter.mixed) {
-      await trace(runId, {
-        layer: "system",
-        agent: "KERNEL",
-        message: `market focus engaged — ${(run.markets ?? []).join(", ")}. ${allCandidates.length} qualifying signal${allCandidates.length === 1 ? "" : "s"} kept, ${filteredOut} off-target angle${filteredOut === 1 ? "" : "s"} discarded before the analysts.`,
-        mood: "info",
-      });
+      allCandidates.push(...cands);
     }
 
     const slateText = pre.map(digest).join("\n\n");
@@ -927,10 +779,6 @@ export async function runPipeline(runId: number, keys: KeyBag = {}, ownerId: str
     for (const c of allCandidates) {
       const kills: string[] = [];
       if (c.category === "moneyline" && c.odds < -260) kills.push("juice too heavy — no price value on a massive favorite");
-      // Combat prices are the model's own fair numbers, so a heavily juiced
-      // read carries no edge unless a book is far longer. Refuse those.
-      if (c.category.startsWith("fight_") && c.odds < -250)
-        kills.push("model price too short — nothing to beat at this number");
       if (c.signals.includes("SHARP") && c.game.odds && Math.abs(c.game.odds.homeSpread ?? 0) >= 14 && c.category === "spread")
         kills.push("double-digit spread in a variance sport — trap profile");
       if (c.confidence < 54) kills.push("edge below professional threshold");
@@ -990,9 +838,7 @@ export async function runPipeline(runId: number, keys: KeyBag = {}, ownerId: str
     // spreads — it spans sides, totals, team props, player props and segment
     // derivatives. Families get reserved chairs before raw edge fills the rest.
     const familyOf = (cat: string): string =>
-      cat.startsWith("fight_")
-        ? "combat"
-        : cat === "spread" || cat === "moneyline"
+      cat === "spread" || cat === "moneyline"
         ? "side"
         : cat === "total"
           ? "game_total"
@@ -1001,11 +847,13 @@ export async function runPipeline(runId: number, keys: KeyBag = {}, ownerId: str
             : cat === "player_prop"
               ? "player_prop"
               : "segment_prop";
-    // A balanced card caps each family; when the user has explicitly focused
-    // the run on specific markets, diversity quotas would only starve the card.
-    const FAMILY_CAP: Record<string, number> = filter.mixed
-      ? { side: 4, game_total: 2, team_prop: 2, player_prop: 3, segment_prop: 3, combat: 4 }
-      : { side: 10, game_total: 10, team_prop: 10, player_prop: 10, segment_prop: 10, combat: 10 };
+    const FAMILY_CAP: Record<string, number> = {
+      side: 4, // sides never dominate the card
+      game_total: 2,
+      team_prop: 2,
+      player_prop: 3,
+      segment_prop: 3,
+    };
     const card: Candidate[] = [];
     const perGame = new Map<string, number>();
     const perFamily = new Map<string, number>();
@@ -1023,7 +871,7 @@ export async function runPipeline(runId: number, keys: KeyBag = {}, ownerId: str
     };
     const eligible = (c: Candidate, budget = 12.05): boolean => {
       if (card.includes(c)) return false;
-      if ((perGame.get(c.game.eventId) ?? 0) >= (filter.mixed ? 2 : 3)) return false;
+      if ((perGame.get(c.game.eventId) ?? 0) >= 2) return false;
       const fam = familyOf(c.category);
       if ((perFamily.get(fam) ?? 0) >= (FAMILY_CAP[fam] ?? 3)) return false;
       return exposure + unitsFor(c) <= budget; // RISK veto on oversize
@@ -1033,13 +881,11 @@ export async function runPipeline(runId: number, keys: KeyBag = {}, ownerId: str
     // roughly half the bankroll so alternate markets can still be seated.
     for (const c of live) {
       if (card.length >= 4) break;
-      if (eligible(c, filter.mixed ? 7.5 : 12.05)) seat(c);
+      if (eligible(c, 7.5)) seat(c);
     }
 
     // Phase 2 — one guaranteed chair for every market family with a live edge.
-    const families = filter.mixed
-      ? ["game_total", "player_prop", "team_prop", "segment_prop", "combat", "side"]
-      : [];
+    const families = ["game_total", "player_prop", "team_prop", "segment_prop", "side"];
     for (const fam of families) {
       if (card.length >= 10) break;
       if ((perFamily.get(fam) ?? 0) > 0) continue;
@@ -1141,7 +987,6 @@ export function unitsFor(c: { confidence: number; category: string; signals?: st
 
 async function finishRun(runId: number, ownerId: string, slateDate: string, decision: CouncilDecision, card: Candidate[]): Promise<void> {
   const repeats: NonNullable<CouncilDecision["repeats"]> = [];
-  const carried: number[] = [];
   let released = 0;
 
   for (const c of card) {
@@ -1160,8 +1005,6 @@ async function finishRun(runId: number, ownerId: string, slateDate: string, deci
       .limit(1);
 
     if (existing) {
-      // Already staked — show it on this card, but never grade it twice.
-      carried.push(existing.id);
       repeats.push({
         pick: c.pick,
         matchup: c.game.matchup,
@@ -1211,12 +1054,12 @@ async function finishRun(runId: number, ownerId: string, slateDate: string, deci
   const finalDecision: CouncilDecision = { ...decision, repeats };
   if (repeats.length) {
     finalDecision.memo =
-      `${decision.memo} ${repeats.length} of these ${repeats.length + released} selections were already staked on an earlier run — they are shown again here but stay graded once.`.trim();
+      `${decision.memo} ${repeats.length} of the council's selections were already live on your ledger and were not re-staked — they stay graded once.`.trim();
   }
 
   await db
     .update(runs)
-    .set({ status: "completed", council: finalDecision, carried, completedAt: new Date() })
+    .set({ status: "completed", council: finalDecision, completedAt: new Date() })
     .where(eq(runs.id, runId));
 }
 
@@ -1298,43 +1141,6 @@ export async function gradePending(ownerId: string = HOUSE): Promise<{ graded: n
 
     // ---- segment (period/half/inning) markets settle off the linescore ----
     const seg = g.segment ?? "FULL";
-
-    if (seg === "FIGHT" || p.category.startsWith("fight_")) {
-      let fightOutcome: "win" | "loss" | "push" | null = null;
-      if (p.category === "fight_ml") {
-        const pickedHome = g.side === "home";
-        const homeWon = f.homeScore === 1;
-        const awayWon = f.awayScore === 1;
-        if (!homeWon && !awayWon) fightOutcome = "push"; // draw / no contest
-        else fightOutcome = (pickedHome && homeWon) || (!pickedHome && awayWon) ? "win" : "loss";
-      } else if (p.category === "fight_method") {
-        // side "under" == wagered on a finish, "over" == wagered on a decision
-        const went = f.wentDistance === true;
-        fightOutcome = (g.side === "under" && !went) || (g.side === "over" && went) ? "win" : "loss";
-      } else if (p.category === "fight_rounds" && g.line != null) {
-        const elapsed = f.elapsedMinutes ?? 0;
-        const threshold = g.line * 5; // rounds are five minutes
-        if (Math.abs(elapsed - threshold) < 0.02) fightOutcome = "push";
-        else fightOutcome = (elapsed > threshold) === (g.side === "over") ? "win" : "loss";
-      }
-      if (fightOutcome) {
-        const how = f.wentDistance
-          ? "decision"
-          : `R${f.endRound ?? "?"} finish`;
-        const finalScore = `${f.winnerName ?? "result"} def. — ${how}`;
-        await db
-          .update(predictions)
-          .set({ outcome: fightOutcome, finalScore, gradedAt: new Date() })
-          .where(eq(predictions.id, p.id));
-        graded++;
-        if (fightOutcome === "win") wins++;
-        else if (fightOutcome === "loss") losses++;
-        else pushes++;
-        creditList.push({ agents: p.agents, outcome: fightOutcome, confidence: p.confidence });
-      }
-      continue;
-    }
-
     if (seg !== "FULL") {
       const slice = (line: number[]): number | null => {
         if (!line.length) return null;
