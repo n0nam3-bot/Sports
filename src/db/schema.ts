@@ -46,13 +46,10 @@ export type BetCategory =
   | "1q_total"
   | "p1_total"
   | "f5_total"
-  | "nrfi"
-  | "fight_ml"
-  | "fight_method"
-  | "fight_rounds";
+  | "nrfi";
 
 /** Which slice of the game a wager settles against. */
-export type Segment = "FULL" | "1H" | "1Q" | "P1" | "F5" | "1I" | "FIGHT";
+export type Segment = "FULL" | "1H" | "1Q" | "P1" | "F5" | "1I";
 
 export interface GradeSpec {
   // resolved against the final score of eventId
@@ -94,10 +91,6 @@ export const runs = pgTable("runs", {
   ownerId: text("owner_id").notNull().default("house"),
   slateDate: text("slate_date").notNull(), // YYYY-MM-DD
   sports: jsonb("sports").$type<string[]>().notNull(),
-  markets: jsonb("markets")
-    .$type<string[]>()
-    .notNull()
-    .default(sql`'[]'::jsonb`),
   status: text("status").notNull().default("running"), // running | completed | failed
   mode: text("mode").notNull().default("heuristic"), // heuristic | llm
   gamesFound: integer("games_found").notNull().default(0),
@@ -105,15 +98,6 @@ export const runs = pgTable("runs", {
   gamesSkipped: integer("games_skipped").notNull().default(0),
   trace: jsonb("trace")
     .$type<TraceEntry[]>()
-    .notNull()
-    .default(sql`'[]'::jsonb`),
-  /**
-   * Prediction ids re-selected by this run that were already staked earlier.
-   * They are displayed as part of this run's card but graded only once, on
-   * the run that first released them.
-   */
-  carried: jsonb("carried")
-    .$type<number[]>()
     .notNull()
     .default(sql`'[]'::jsonb`),
   council: jsonb("council")
