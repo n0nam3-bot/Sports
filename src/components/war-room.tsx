@@ -4,10 +4,11 @@ import { useEffect, useRef } from "react";
 import {
   Activity, Ban, Brain, CalendarDays, CheckCircle2, CircleDot, Cpu, Flame,
   Gauge, Loader2, Lock, Play, RefreshCw, ShieldAlert, Siren, Sparkles, Ticket,
-  TrendingUp, Users2, XOctagon, Repeat,
+  TrendingUp, Users2, XOctagon, Repeat, SlidersHorizontal, Shuffle,
 } from "lucide-react";
 import type { GameC, PredC, RunC, SlateResp } from "./types";
 import { CategoryChip, Chip, ConfBar, NeonButton, OutcomeChip, Panel, TeamMark, cx } from "./ui";
+import { MARKET_OPTIONS, optionsForSports } from "@/lib/markets";
 
 const LAYER_DOT: Record<string, string> = {
   scout: "#39d5ff",
@@ -37,8 +38,10 @@ export default function WarRoom(props: {
   date: string;
   setDate: (d: string) => void;
   sports: string[];
-  allSports: readonly { id: string; label: string }[];
+  allSports: readonly { id: string; label: string; unavailable?: boolean }[];
   toggleSport: (id: string) => void;
+  markets: string[];
+  setMarkets: (m: string[]) => void;
   slate: SlateResp | null;
   slateLoading: boolean;
   slateError?: string | null;
@@ -89,9 +92,12 @@ export default function WarRoom(props: {
                   <button
                     key={s.id}
                     onClick={() => props.toggleSport(s.id)}
+                    title={s.unavailable ? "no free data feed exists for boxing" : undefined}
                     className={cx(
                       "clip-tag border px-3 py-2.5 font-mono text-[11px] font-bold tracking-[0.14em] transition-all",
-                      on
+                      s.unavailable
+                        ? "cursor-not-allowed border-white/8 bg-white/[0.015] text-[#2f3b4d] line-through"
+                        : on
                         ? "border-[#9d7bff]/45 bg-[#9d7bff]/14 text-[#9d7bff] shadow-[0_0_12px_-3px_rgba(157,123,255,0.5)]"
                         : "border-white/10 bg-white/[0.03] text-[#5f7089] hover:border-white/25 hover:text-[#8fa3bd]",
                     )}
@@ -101,6 +107,58 @@ export default function WarRoom(props: {
                 );
               })}
             </div>
+          </div>
+
+          <div className="w-full">
+            <label className="mb-1.5 flex flex-wrap items-center gap-1.5 font-mono text-[10px] font-bold uppercase tracking-[0.22em] text-[#5f7089]">
+              <SlidersHorizontal className="h-3.5 w-3.5 text-[#ffb020]" /> market focus
+              <span className="normal-case tracking-normal text-[#3d4c63]">
+                — leave on mixed for a balanced card, or pick exactly what you want to bet
+              </span>
+            </label>
+            <div className="flex flex-wrap gap-1.5">
+              <button
+                onClick={() => props.setMarkets([])}
+                className={cx(
+                  "clip-tag flex items-center gap-1.5 border px-3 py-2 font-mono text-[10.5px] font-bold uppercase tracking-[0.12em] transition-all",
+                  props.markets.length === 0
+                    ? "border-[#37ff8b]/45 bg-[#37ff8b]/14 text-[#37ff8b] shadow-[0_0_12px_-3px_rgba(55,255,139,0.5)]"
+                    : "border-white/10 bg-white/[0.03] text-[#5f7089] hover:border-white/25 hover:text-[#8fa3bd]",
+                )}
+              >
+                <Shuffle className="h-3.5 w-3.5" /> mixed (default)
+              </button>
+              {optionsForSports(props.sports).map((m) => {
+                const on = props.markets.includes(m.id);
+                return (
+                  <button
+                    key={m.id}
+                    title={m.hint}
+                    onClick={() =>
+                      props.setMarkets(
+                        on
+                          ? props.markets.filter((x) => x !== m.id)
+                          : [...props.markets, m.id],
+                      )
+                    }
+                    className={cx(
+                      "clip-tag border px-3 py-2 font-mono text-[10.5px] font-bold uppercase tracking-[0.12em] transition-all",
+                      on
+                        ? "border-[#ffb020]/50 bg-[#ffb020]/14 text-[#ffb020] shadow-[0_0_12px_-3px_rgba(255,176,32,0.5)]"
+                        : "border-white/10 bg-white/[0.03] text-[#5f7089] hover:border-white/25 hover:text-[#8fa3bd]",
+                    )}
+                  >
+                    {m.label}
+                  </button>
+                );
+              })}
+            </div>
+            {props.markets.length > 0 && (
+              <p className="mt-1.5 font-mono text-[9.5px] uppercase tracking-[0.14em] text-[#ffc966]">
+                focused card — the council will only release {props.markets.length} selected market
+                {props.markets.length === 1 ? "" : "s"} and will pass entirely if none carry an edge
+              </p>
+            )}
           </div>
 
           <div className="mb-0.5 ml-auto flex flex-wrap items-center gap-2.5">
@@ -271,11 +329,18 @@ export default function WarRoom(props: {
       )}
 
       {council && predictions.length === 0 && card?.status === "completed" && (
-        <Panel className="rise flex items-center gap-3 p-5">
-          <Ban className="h-5 w-5 text-[#ffb020]" />
+        <Panel className="rise flex items-start gap-3 p-5">
+          <Ban className="mt-0.5 h-5 w-5 shrink-0 text-[#ffb020]" />
           <div>
             <div className="font-display text-lg font-bold">{council.headline}</div>
             <div className="text-[13px] text-[#8fa3bd]">{council.memo}</div>
+            {props.sports.some((s) => ["ufc", "dwcs", "pfl"].includes(s)) && (
+              <div className="mt-2 text-[12px] leading-relaxed text-[#5f7089]">
+                Prospect cards like DWCS routinely match undefeated fighters against each other, so the
+                model lands near a coin-flip and correctly declines to force a side. Round and method
+                angles are still shown on each bout above.
+              </div>
+            )}
           </div>
         </Panel>
       )}
@@ -341,7 +406,17 @@ function BetCard({ rank, p }: { rank: number; p: PredC }) {
           <CategoryChip category={p.category} />
           <div className="mt-1 truncate font-display text-[15px] font-bold leading-snug text-[#e8f1fb]">{p.pick}</div>
         </div>
-        <OutcomeChip outcome={p.outcome} />
+        <div className="flex flex-col items-end gap-1">
+          <OutcomeChip outcome={p.outcome} />
+          {p.carried && (
+            <span
+              className="clip-tag border border-[#39d5ff]/25 bg-[#39d5ff]/8 px-1.5 py-px font-mono text-[8px] font-bold uppercase tracking-[0.12em] text-[#7fd4f5]"
+              title="already staked on an earlier run — shown here but graded once"
+            >
+              already staked
+            </span>
+          )}
+        </div>
       </div>
 
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-[10.5px] uppercase tracking-[0.12em] text-[#5f7089]">
@@ -401,7 +476,13 @@ function GameCard({ g }: { g: GameC }) {
           { t: g.home, ml: o?.homeML, rest: homeRest, away: false },
         ].map(({ t, ml, rest, away }) => (
           <div key={t.abbr + away} className="flex items-center gap-3">
-            <TeamMark src={t.logo} abbr={t.abbr} size={38} />
+            {g.combat ? (
+              <span className="flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-full border border-[#ff3d81]/25 bg-[#ff3d81]/8 font-mono text-[10px] font-bold text-[#ff3d81]">
+                {away ? "A" : "B"}
+              </span>
+            ) : (
+              <TeamMark src={t.logo} abbr={t.abbr} size={38} />
+            )}
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
                 <span className="truncate font-display text-[14.5px] font-bold text-[#e8f1fb]">{t.name}</span>
@@ -411,16 +492,61 @@ function GameCard({ g }: { g: GameC }) {
                 {t.record}{away && t.awayRecord ? ` · road ${t.awayRecord}` : ""}{!away && t.homeRecord ? ` · home ${t.homeRecord}` : ""}
               </div>
             </div>
-            {ml != null && (
+            {g.combat ? (
+              (() => {
+                const fm = away ? g.combat.model.fairAwayML : g.combat.model.fairHomeML;
+                const pr = away ? g.combat.model.pAway : g.combat.model.pHome;
+                return (
+                  <span className="text-right">
+                    <span className={cx("block font-mono text-[12px] font-bold", fm < 0 ? "text-[#37ff8b]" : "text-[#8fa3bd]")}>
+                      {fm > 0 ? `+${fm}` : fm}
+                    </span>
+                    <span className="block font-mono text-[8.5px] uppercase tracking-[0.1em] text-[#3d4c63]">
+                      {(pr * 100).toFixed(0)}% model
+                    </span>
+                  </span>
+                );
+              })()
+            ) : ml != null ? (
               <span className={cx("font-mono text-[12px] font-bold", ml < 0 ? "text-[#37ff8b]" : "text-[#8fa3bd]")}>
                 {ml > 0 ? `+${ml}` : ml}
               </span>
-            )}
+            ) : null}
           </div>
         ))}
       </div>
 
       {/* market strip */}
+      {g.combat ? (
+        <>
+          <div className="mt-3 grid grid-cols-4 gap-1.5 border-t border-white/6 pt-3 font-mono text-center">
+            <div className="rounded bg-white/[0.03] px-1 py-1.5">
+              <div className="text-[8.5px] uppercase tracking-[0.18em] text-[#3d4c63]">division</div>
+              <div className="text-[10px] font-bold text-[#ff3d81]">{g.combat.weightClass}</div>
+            </div>
+            <div className="rounded bg-white/[0.03] px-1 py-1.5">
+              <div className="text-[8.5px] uppercase tracking-[0.18em] text-[#3d4c63]">rounds</div>
+              <div className="text-[10px] font-bold text-[#9d7bff]">{g.combat.scheduledRounds}</div>
+            </div>
+            <div className="rounded bg-white/[0.03] px-1 py-1.5" title="model price that the fight ends inside the distance">
+              <div className="text-[8.5px] uppercase tracking-[0.18em] text-[#3d4c63]">finish</div>
+              <div className="text-[10px] font-bold text-[#37ff8b]">
+                {g.combat.model.fairFinish > 0 ? `+${g.combat.model.fairFinish}` : g.combat.model.fairFinish}
+              </div>
+            </div>
+            <div className="rounded bg-white/[0.03] px-1 py-1.5" title="model price on the round total">
+              <div className="text-[8.5px] uppercase tracking-[0.18em] text-[#3d4c63]">o{g.combat.model.roundLine} rds</div>
+              <div className="text-[10px] font-bold text-[#39d5ff]">
+                {g.combat.model.fairRoundsOver > 0 ? `+${g.combat.model.fairRoundsOver}` : g.combat.model.fairRoundsOver}
+              </div>
+            </div>
+          </div>
+          <div className="mt-1.5 flex items-center gap-1 font-mono text-[8.5px] uppercase tracking-[0.14em] text-[#5f7089]">
+            <Gauge className="h-3 w-3 text-[#ffb020]" />
+            model prices — no sportsbook publishes MMA lines on the free feed
+          </div>
+        </>
+      ) : (
       <div className="mt-3 grid grid-cols-3 gap-1.5 border-t border-white/6 pt-3 font-mono text-center">
         <div className="rounded bg-white/[0.03] px-1 py-1.5">
           <div className="text-[8.5px] uppercase tracking-[0.18em] text-[#3d4c63]">spread</div>
@@ -437,6 +563,7 @@ function GameCard({ g }: { g: GameC }) {
           </div>
         </div>
       </div>
+      )}
 
       {/* injuries */}
       {g.injuries.length > 0 && (

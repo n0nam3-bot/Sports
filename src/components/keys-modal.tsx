@@ -18,22 +18,22 @@ interface ProviderTest {
 /** Curated free / free-tier-friendly models per provider. */
 const MODEL_CHOICES: Record<string, { value: string; note: string }[]> = {
   gemini: [
-    { value: "gemini-2.0-flash", note: "fast · best free tier" },
-    { value: "gemini-2.0-flash-lite", note: "cheapest · highest limits" },
-    { value: "gemini-2.5-flash", note: "newer · stronger reasoning" },
-    { value: "gemini-1.5-flash", note: "legacy fallback" },
+    { value: "gemini-2.5-flash", note: "strong · may require prior usage" },
+    { value: "gemini-2.5-flash-lite", note: "lighter · may require prior usage" },
+    { value: "gemini-3.5-flash-lite", note: "newest lite · recommended" },
+    { value: "gemini-3.8-flash", note: "newest flagship · recommended" },
   ],
   openrouter: [
-    { value: "google/gemini-2.0-flash-exp:free", note: "free route" },
-    { value: "meta-llama/llama-3.3-70b-instruct:free", note: "free route" },
-    { value: "deepseek/deepseek-chat-v3-0324:free", note: "free route" },
-    { value: "qwen/qwen-2.5-72b-instruct:free", note: "free route" },
-    { value: "google/gemini-2.0-flash-001", note: "paid · very cheap" },
+    { value: "nvidia/nemotron-3-super-120b-a12b:free", note: "free · reliable" },
+    { value: "nvidia/nemotron-3.5-lightning:free", note: "free · 1M context" },
+    { value: "cohere/north-mini-code:free", note: "free · fast · reliable" },
+    { value: "meta-llama/llama-3.3-70b-instruct:free", note: "free · if available" },
+    { value: "nvidia/nemotron-3-ultra-550b-a55b:free", note: "free · largest" },
+    { value: "inclusionai/ling-3.0-flash-sante:free", note: "free · reliable" },
   ],
   xai: [
-    { value: "grok-3-mini", note: "cheapest grok" },
-    { value: "grok-3", note: "flagship" },
-    { value: "grok-2-1212", note: "previous gen" },
+    { value: "grok-3-mini", note: "cheapest · may need credits" },
+    { value: "grok-3", note: "flagship · needs credits" },
   ],
   ollamaUrl: [
     { value: "llama3.1", note: "8B · solid default" },
@@ -41,6 +41,7 @@ const MODEL_CHOICES: Record<string, { value: string; note: string }[]> = {
     { value: "qwen2.5", note: "strong at JSON" },
     { value: "mistral", note: "7B · lightweight" },
     { value: "phi3", note: "tiny · low RAM" },
+    { value: "gemma2", note: "9B · Google quality" },
   ],
 };
 
@@ -147,7 +148,7 @@ const FIELDS: {
     placeholder: "http://localhost:11434",
     modelPlaceholder: "llama3.1",
     signup: "https://ollama.com",
-    blurb: "Runs on your own machine — unlimited and totally free.",
+    blurb: "Runs on your own machine — unlimited and totally free. Install Ollama, run \"ollama serve\" and \"ollama pull llama3.1\", then paste http://localhost:11434 here. Only works when your PC and this site are on the same network (not possible on Vercel → use ngrok or a VPN tunnel to expose it).",
   },
 ];
 
