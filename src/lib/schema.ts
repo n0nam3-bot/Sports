@@ -104,6 +104,12 @@ export function ensureSchema(): Promise<void> {
         WHERE "dedupe_key" <> '';
     `);
     await db.execute(sql`
+      ALTER TABLE "runs" ADD COLUMN IF NOT EXISTS "markets" jsonb NOT NULL DEFAULT '[]'::jsonb;
+    `);
+    await db.execute(sql`
+      ALTER TABLE "runs" ADD COLUMN IF NOT EXISTS "carried" jsonb NOT NULL DEFAULT '[]'::jsonb;
+    `);
+    await db.execute(sql`
       CREATE INDEX IF NOT EXISTS "runs_owner_idx" ON "runs" ("owner_id", "id" DESC);
     `);
   })();

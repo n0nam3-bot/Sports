@@ -29,8 +29,8 @@ export interface KeyBag {
 }
 
 const DEFAULT_MODELS = {
-  openrouter: "google/gemini-2.0-flash-001",
-  gemini: "gemini-2.0-flash",
+  openrouter: "nvidia/nemotron-3-super-120b-a12b:free",
+  gemini: "gemini-2.5-flash",
   grok: "grok-3-mini",
   ollama: "llama3.1",
 };
