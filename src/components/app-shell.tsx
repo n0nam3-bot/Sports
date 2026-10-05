@@ -7,7 +7,16 @@ import {
 import type { AgentC, RunC, SlateResp } from "./types";
 import { cx } from "./ui";
 import KeysModal from "./keys-modal";
-import { loadVault, vaultActive, vaultFetch, EMPTY_VAULT, type KeyVault } from "./keys";
+import {
+  loadLlmMode,
+  loadVault,
+  saveLlmMode,
+  vaultActive,
+  vaultFetch,
+  EMPTY_VAULT,
+  type KeyVault,
+  type LlmMode,
+} from "./keys";
 import WarRoom from "./war-room";
 import AgentsView from "./agents-view";
 import RunsView from "./runs-view";
@@ -49,12 +58,15 @@ export default function AppShell() {
   const [vault, setVault] = useState<KeyVault>(EMPTY_VAULT);
   const [keysOpen, setKeysOpen] = useState(false);
   const [markets, setMarkets] = useState<string[]>([]);
+  const [llmMode, setLlmMode] = useState<LlmMode>("off");
+  const [excludedEvents, setExcludedEvents] = useState<string[]>([]);
   const activeIdRef = useRef<number | null>(null);
   activeIdRef.current = activeId;
 
   // hydrate the visitor's own key vault from localStorage
   useEffect(() => {
     setVault(loadVault());
+    setLlmMode(loadLlmMode());
   }, []);
 
   // live ET clock
@@ -79,7 +91,12 @@ export default function AppShell() {
     setSlateLoading(true);
     setSlateError(null);
     try {
-      const res = await vaultFetch(`/api/slate?date=${date}&sports=${sports.join(",")}`, {}, vault);
+      const res = await vaultFetch(
+        `/api/slate?date=${date}&sports=${sports.join(",")}`,
+        {},
+        vault,
+        { llmMode },
+      );
       const data = await res.json();
       if (data.error) {
         setSlateError(`${data.error}${data.hint ? ` — ${data.hint}` : ""}`);
@@ -95,19 +112,19 @@ export default function AppShell() {
     } finally {
       setSlateLoading(false);
     }
-  }, [date, sports, vault]);
+  }, [date, sports, vault, llmMode]);
 
   const loadRuns = useCallback(async () => {
-    const res = await fetch("/api/runs");
+    const res = await vaultFetch("/api/runs", {}, vault, { llmMode });
     const data = await res.json();
     setRunsData(data.runs ?? []);
-  }, []);
+  }, [vault, llmMode]);
 
   const loadAgents = useCallback(async () => {
-    const res = await vaultFetch("/api/agents", {}, vault);
+    const res = await vaultFetch("/api/agents", {}, vault, { llmMode });
     const data = await res.json();
     setAgentsData(data.agents ?? []);
-  }, [vault]);
+  }, [vault, llmMode]);
 
   useEffect(() => { void loadSlate(); }, [loadSlate]);
   useEffect(() => { void loadRuns(); void loadAgents(); }, [loadRuns, loadAgents]);
@@ -117,7 +134,7 @@ export default function AppShell() {
     if (activeId == null) return;
     let dead = false;
     const poll = async () => {
-      const res = await fetch(`/api/runs/${activeId}`);
+      const res = await vaultFetch(`/api/runs/${activeId}`, {}, vault, { llmMode });
       const data = await res.json();
       if (dead || !data.run) return;
       setActiveRun(data.run);
@@ -126,7 +143,7 @@ export default function AppShell() {
     };
     void poll();
     return () => { dead = true; };
-  }, [activeId, loadRuns, loadAgents]);
+  }, [activeId, loadRuns, loadAgents, vault, llmMode]);
 
   const launch = useCallback(async () => {
     setLaunching(true);
@@ -136,9 +153,18 @@ export default function AppShell() {
         {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ date, sports, markets }),
+          body: JSON.stringify({
+            date,
+            sports,
+            markets,
+            includeEvents:
+              slate?.games
+                .filter((g) => g.status === "pre" && !excludedEvents.includes(g.eventId))
+                .map((g) => g.eventId) ?? [],
+          }),
         },
         vault,
+        { llmMode },
       );
       const data = await res.json();
       if (data.id) {
@@ -150,16 +176,16 @@ export default function AppShell() {
     } finally {
       setLaunching(false);
     }
-  }, [date, sports, markets, flash, vault]);
+  }, [date, sports, markets, flash, vault, llmMode, slate, excludedEvents]);
 
   const grade = useCallback(async () => {
-    const res = await fetch("/api/grade", { method: "POST" });
+    const res = await vaultFetch("/api/grade", { method: "POST" }, vault, { llmMode });
     const data = await res.json();
     if (data.error) flash(`grading fault: ${data.error}`);
     else if (data.graded === 0) flash("no settled games yet — check back after final whistles");
     else flash(`graded ${data.graded} predictions — ${data.wins}W · ${data.losses}L · ${data.pushes}P. agent ratings updated.`);
     void loadRuns(); void loadAgents();
-  }, [flash, loadRuns, loadAgents]);
+  }, [flash, loadRuns, loadAgents, vault, llmMode]);
 
   const toggleSport = (id: string) => {
     if (ALL_SPORTS.find((s) => s.id === id)?.unavailable) {
@@ -239,7 +265,7 @@ export default function AppShell() {
               title="Add your own free AI keys (optional)"
             >
               <KeyRound className="h-3.5 w-3.5" />
-              <span className="hidden sm:inline">{vaultActive(vault) ? "your ai: on" : "add ai keys"}</span>
+              <span className="hidden sm:inline">{vaultActive(vault) ? "keys stored" : "add ai keys"}</span>
             </button>
             <span className="hidden sm:inline-flex items-center gap-1.5">
               <Radio className="h-3.5 w-3.5 text-[#ff3d81]" /> ET {clock}
@@ -333,6 +359,13 @@ export default function AppShell() {
             toggleSport={toggleSport}
             markets={markets}
             setMarkets={setMarkets}
+            llmMode={llmMode}
+            setLlmMode={(mode: LlmMode) => {
+              setLlmMode(mode);
+              saveLlmMode(mode);
+            }}
+            excludedEvents={excludedEvents}
+            setExcludedEvents={setExcludedEvents}
             slate={slate}
             slateLoading={slateLoading}
             slateError={slateError}

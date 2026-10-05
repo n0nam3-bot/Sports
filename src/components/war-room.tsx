@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity, Ban, Brain, CalendarDays, CheckCircle2, CircleDot, Cpu, Flame,
   Gauge, Loader2, Lock, Play, RefreshCw, ShieldAlert, Siren, Sparkles, Ticket,
-  TrendingUp, Users2, XOctagon, Repeat, SlidersHorizontal, Shuffle,
+  TrendingUp, Users2, XOctagon, Repeat, SlidersHorizontal, Shuffle, ToggleLeft, ToggleRight,
 } from "lucide-react";
 import type { GameC, PredC, RunC, SlateResp } from "./types";
 import { CategoryChip, Chip, ConfBar, NeonButton, OutcomeChip, Panel, TeamMark, cx } from "./ui";
@@ -42,6 +42,10 @@ export default function WarRoom(props: {
   toggleSport: (id: string) => void;
   markets: string[];
   setMarkets: (m: string[]) => void;
+  llmMode: "off" | "on";
+  setLlmMode: (mode: "off" | "on") => void;
+  excludedEvents: string[];
+  setExcludedEvents: (ids: string[]) => void;
   slate: SlateResp | null;
   slateLoading: boolean;
   slateError?: string | null;
@@ -63,6 +67,10 @@ export default function WarRoom(props: {
   const showConsole = activeRun != null;
   const predictions = card?.status === "completed" ? card.predictions : [];
   const council = card?.council;
+  const includedCount = useMemo(
+    () => slate?.games.filter((g) => g.status === "pre" && !props.excludedEvents.includes(g.eventId)).length ?? 0,
+    [slate, props.excludedEvents],
+  );
 
   return (
     <div className="space-y-6">
@@ -159,6 +167,25 @@ export default function WarRoom(props: {
                 {props.markets.length === 1 ? "" : "s"} and will pass entirely if none carry an edge
               </p>
             )}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2.5">
+            <button
+              onClick={() => props.setLlmMode(props.llmMode === "on" ? "off" : "on")}
+              className={cx(
+                "clip-tag flex items-center gap-2 border px-3 py-2 font-mono text-[10.5px] font-bold uppercase tracking-[0.14em] transition-all",
+                props.llmMode === "on"
+                  ? "border-[#37ff8b]/45 bg-[#37ff8b]/12 text-[#37ff8b]"
+                  : "border-[#39d5ff]/35 bg-[#39d5ff]/10 text-[#39d5ff]",
+              )}
+              title="Use saved AI keys only when you explicitly enable them"
+            >
+              {props.llmMode === "on" ? <ToggleRight className="h-4 w-4" /> : <ToggleLeft className="h-4 w-4" />}
+              llm {props.llmMode === "on" ? "enabled" : "disabled"}
+            </button>
+            <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-[#5f7089]">
+              {includedCount} selected game{includedCount === 1 ? "" : "s"}
+            </span>
           </div>
 
           <div className="mb-0.5 ml-auto flex flex-wrap items-center gap-2.5">
@@ -379,7 +406,18 @@ export default function WarRoom(props: {
 
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {slate?.games.map((g) => (
-            <GameCard key={`${g.sport}-${g.eventId}`} g={g} />
+            <GameCard
+              key={`${g.sport}-${g.eventId}`}
+              g={g}
+              excluded={props.excludedEvents.includes(g.eventId)}
+              toggleExcluded={() =>
+                props.setExcludedEvents(
+                  props.excludedEvents.includes(g.eventId)
+                    ? props.excludedEvents.filter((id) => id !== g.eventId)
+                    : [...props.excludedEvents, g.eventId],
+                )
+              }
+            />
           ))}
         </div>
       </section>
@@ -416,6 +454,14 @@ function BetCard({ rank, p }: { rank: number; p: PredC }) {
               already staked
             </span>
           )}
+          {p.isDuplicate && p.canonRunId && (
+            <span
+              className="clip-tag border border-[#5f7089]/30 bg-[#5f7089]/8 px-1.5 py-px font-mono text-[8px] font-bold uppercase tracking-[0.12em] text-[#8fa3bd]"
+              title={`same pick as run #${p.canonRunId} — graded there, not here`}
+            >
+              ★ same as run #{p.canonRunId}
+            </span>
+          )}
         </div>
       </div>
 
@@ -447,7 +493,15 @@ function BetCard({ rank, p }: { rank: number; p: PredC }) {
 
 /* ================= game card ================= */
 
-function GameCard({ g }: { g: GameC }) {
+function GameCard({
+  g,
+  excluded,
+  toggleExcluded,
+}: {
+  g: GameC;
+  excluded: boolean;
+  toggleExcluded: () => void;
+}) {
   const dead = g.status !== "pre";
   const o = g.odds;
   const homeRest = g.rest ? restTag(g.rest.homeDays, g.rest.homeB2B, g.rest.home3in4, g.rest.homeTravel) : null;
@@ -456,8 +510,24 @@ function GameCard({ g }: { g: GameC }) {
   return (
     <Panel className={cx("relative overflow-hidden p-4", dead && "opacity-60 saturate-50")}>
       {/* header */}
-      <div className="mb-3 flex items-center justify-between">
-        <span className="font-mono text-[10px] font-bold uppercase tracking-[0.22em] text-[#39d5ff]">{g.sportLabel}</span>
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-[10px] font-bold uppercase tracking-[0.22em] text-[#39d5ff]">{g.sportLabel}</span>
+          {g.status === "pre" && (
+            <button
+              onClick={toggleExcluded}
+              className={cx(
+                "clip-tag border px-1.5 py-px font-mono text-[8px] font-bold uppercase tracking-[0.14em] transition-all",
+                excluded
+                  ? "border-[#ff4757]/35 bg-[#ff4757]/10 text-[#ff8296]"
+                  : "border-[#37ff8b]/30 bg-[#37ff8b]/8 text-[#37ff8b]",
+              )}
+              title={excluded ? "excluded from analysis" : "included in analysis"}
+            >
+              {excluded ? "excluded" : "included"}
+            </button>
+          )}
+        </div>
         {g.status === "pre" ? (
           <span className="font-mono text-[10px] uppercase tracking-[0.16em] text-[#5f7089]">{etTime(g.startTime)} ET</span>
         ) : g.status === "in" ? (
@@ -565,20 +635,37 @@ function GameCard({ g }: { g: GameC }) {
       </div>
       )}
 
-      {/* injuries */}
-      {g.injuries.length > 0 && (
-        <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
-          <ShieldAlert className="h-3 w-3 text-[#ffb020]" />
-          {g.injuries.slice(0, 3).map((inj) => (
-            <span key={inj.player} className="clip-tag border border-[#ffb020]/20 bg-[#ffb020]/8 px-1.5 py-px font-mono text-[8.5px] uppercase tracking-wider text-[#ffc966]" title={`${inj.player} — ${inj.status} ${inj.detail}`}>
-              {inj.player.split(" ").pop()} · {inj.status}
-            </span>
-          ))}
-          {g.injuries.length > 3 && (
-            <span className="font-mono text-[9px] uppercase text-[#5f7089]">+{g.injuries.length - 3} more</span>
+      {/* pregame context */}
+      {(g.context.awayProbables.length > 0 || g.context.homeProbables.length > 0 || g.context.notes.length > 0) && (
+        <div className="mt-2.5 space-y-1.5 border-t border-white/6 pt-2.5">
+          {g.context.awayProbables.length > 0 || g.context.homeProbables.length > 0 ? (
+            <div className="flex flex-wrap items-center gap-1.5">
+              {g.context.awayProbables.map((p) => (
+                <span key={`a-${p.name}`} className="clip-tag border border-[#39d5ff]/20 bg-[#39d5ff]/8 px-1.5 py-px font-mono text-[8.5px] uppercase tracking-wider text-[#7fd4f5]" title={p.record || p.role}>
+                  {g.away.abbr} {p.position || p.role}: {p.shortName}{p.record ? ` ${p.record}` : ""}
+                </span>
+              ))}
+              {g.context.homeProbables.map((p) => (
+                <span key={`h-${p.name}`} className="clip-tag border border-[#39d5ff]/20 bg-[#39d5ff]/8 px-1.5 py-px font-mono text-[8.5px] uppercase tracking-wider text-[#7fd4f5]" title={p.record || p.role}>
+                  {g.home.abbr} {p.position || p.role}: {p.shortName}{p.record ? ` ${p.record}` : ""}
+                </span>
+              ))}
+            </div>
+          ) : null}
+          {g.context.notes.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5">
+              {g.context.notes.slice(0, 3).map((n) => (
+                <span key={n} className="clip-tag border border-white/10 bg-white/[0.04] px-1.5 py-px font-mono text-[8.5px] uppercase tracking-wider text-[#8fa3bd]">
+                  {n}
+                </span>
+              ))}
+            </div>
           )}
         </div>
       )}
+
+      {/* injuries */}
+      <InjuryList injuries={g.injuries} />
 
       {dead && (
         <div className="pointer-events-none absolute inset-x-0 bottom-0 flex items-center justify-center gap-1.5 bg-gradient-to-t from-[#03050b]/95 to-transparent pb-1.5 pt-6 font-mono text-[9px] font-bold uppercase tracking-[0.26em] text-[#5f7089]">
@@ -586,5 +673,38 @@ function GameCard({ g }: { g: GameC }) {
         </div>
       )}
     </Panel>
+  );
+}
+
+/* ================= expandable injury list ================= */
+
+function InjuryList({ injuries }: { injuries: { team: string; player: string; status: string; detail: string }[] }) {
+  const [expanded, setExpanded] = useState(false);
+  if (!injuries.length) return null;
+  const shown = expanded ? injuries : injuries.slice(0, 3);
+  const hasMore = injuries.length > 3;
+  return (
+    <div className="mt-2.5">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <ShieldAlert className="h-3 w-3 text-[#ffb020]" />
+        {shown.map((inj) => (
+          <span
+            key={inj.player}
+            className="clip-tag border border-[#ffb020]/20 bg-[#ffb020]/8 px-1.5 py-px font-mono text-[8.5px] uppercase tracking-wider text-[#ffc966]"
+            title={`${inj.player} — ${inj.status}${inj.detail ? ` (${inj.detail})` : ""}`}
+          >
+            {inj.player} · {inj.status}{inj.detail ? ` · ${inj.detail}` : ""}
+          </span>
+        ))}
+        {hasMore && (
+          <button
+            onClick={() => setExpanded((v) => !v)}
+            className="font-mono text-[9px] uppercase text-[#39d5ff] hover:text-[#7fd4f5] transition"
+          >
+            {expanded ? "show less" : `+${injuries.length - 3} more — tap to expand`}
+          </button>
+        )}
+      </div>
+    </div>
   );
 }

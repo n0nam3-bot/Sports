@@ -15,10 +15,14 @@ export interface RestC {
   homeDays: number; awayDays: number; homeB2B: boolean; awayB2B: boolean;
   home3in4: boolean; away3in4: boolean; homeTravel: boolean; awayTravel: boolean;
 }
+export interface ProbableC {
+  role: string; name: string; shortName: string; position: string; record: string;
+}
 export interface GameC {
   eventId: string; sport: string; sportLabel: string; name: string; matchup: string;
   startTime: string; status: "pre" | "in" | "post"; statusDetail: string; venue: string;
   home: TeamInfoC; away: TeamInfoC; odds: OddsC | null; injuries: InjuryC[]; rest: RestC | null;
+  context: { homeProbables: ProbableC[]; awayProbables: ProbableC[]; notes: string[]; lineupPosted: boolean };
   combat?: {
     weightClass: string; scheduledRounds: number; titleFight: boolean; cardSegment: string;
     model: {
@@ -45,12 +49,20 @@ export interface PredC {
   confidence: number; edge: number; agents: string[]; reasoning: string;
   outcome: string; finalScore: string | null; gradedAt: string | null;
   carried?: boolean;
+  isDuplicate?: boolean;
+  canonRunId?: number | null;
 }
 export interface RunC {
   id: number; slateDate: string; sports: string[]; markets?: string[]; status: string; mode: string;
+  isPublic?: number; isViewerRun?: boolean;
   gamesFound: number; gamesAnalyzed: number; gamesSkipped: number;
   trace: TraceC[]; council: CouncilC; carried?: number[]; createdAt: string; completedAt: string | null;
   predictions: PredC[];
+}
+
+export interface PubPredC extends PredC {
+  isDuplicate?: boolean;
+  canonRunId?: number | null;
 }
 
 export interface ImprovementC {

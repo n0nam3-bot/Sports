@@ -175,7 +175,7 @@ export default function KeysModal({
     setTesting(true);
     setResults(null);
     try {
-      const res = await vaultFetch("/api/keys/test", { method: "POST" }, draft);
+      const res = await vaultFetch("/api/keys/test", { method: "POST" }, draft, { llmMode: "on" });
       const data = await res.json();
       setResults(data.providers ?? []);
       setMessage(data.message ?? null);
