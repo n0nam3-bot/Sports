@@ -92,8 +92,14 @@ export const agents = pgTable("agents", {
 export const runs = pgTable("runs", {
   id: serial("id").primaryKey(),
   ownerId: text("owner_id").notNull().default("house"),
+  /** true → this run is part of the shared public prediction feed */
+  isPublic: integer("is_public").notNull().default(0),
   slateDate: text("slate_date").notNull(), // YYYY-MM-DD
   sports: jsonb("sports").$type<string[]>().notNull(),
+  includeEvents: jsonb("include_events")
+    .$type<string[]>()
+    .notNull()
+    .default(sql`'[]'::jsonb`),
   markets: jsonb("markets")
     .$type<string[]>()
     .notNull()
