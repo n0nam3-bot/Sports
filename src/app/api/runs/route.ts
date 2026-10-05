@@ -4,7 +4,7 @@ import { predictions, runs } from "@/db/schema";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { runPipeline } from "@/lib/engine";
 import { ensureSchema } from "@/lib/schema";
-import { keysFromRequest } from "@/lib/llm";
+import { keysFromRequest, llmEnabledFromRequest } from "@/lib/llm";
 import { ownerFromRequest } from "@/lib/owner";
 
 export const dynamic = "force-dynamic";
@@ -81,12 +81,13 @@ export async function POST(req: NextRequest) {
     .returning();
   // Visitor-supplied keys ride along on this one request and are never stored.
   const keys = keysFromRequest(req);
+  const llmEnabled = llmEnabledFromRequest(req);
   if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME) {
     // function hosts freeze after the response — run the cluster inline
-    await runPipeline(run.id, keys, ownerFromRequest(req));
+    await runPipeline(run.id, keys, ownerFromRequest(req), llmEnabled);
   } else {
     // long-lived Node hosts: fire-and-forget, client polls the live trace
-    void runPipeline(run.id, keys, ownerFromRequest(req)).catch(() => {});
+    void runPipeline(run.id, keys, ownerFromRequest(req), llmEnabled).catch(() => {});
   }
   return Response.json({ id: run.id });
 }
