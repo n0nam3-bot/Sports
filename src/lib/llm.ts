@@ -29,8 +29,8 @@ export interface KeyBag {
 }
 
 const DEFAULT_MODELS = {
-  openrouter: "google/gemini-2.0-flash-001",
-  gemini: "gemini-2.0-flash",
+  openrouter: "nvidia/nemotron-3-super-120b-a12b:free",
+  gemini: "gemini-2.5-flash",
   grok: "grok-3-mini",
   ollama: "llama3.1",
 };
@@ -40,11 +40,17 @@ export interface ResolvedTarget extends LLMTarget {
   secret: string;
 }
 
-export function configuredProviders(keys: KeyBag = {}): ResolvedTarget[] {
+export function llmEnabledFromRequest(req: Request): boolean {
+  return req.headers.get("x-neonslip-llm") !== "off";
+}
+
+export function configuredProviders(keys: KeyBag = {}, enabled = true): ResolvedTarget[] {
+  if (!enabled) return [];
   const out: ResolvedTarget[] = [];
   const orKey = keys.openrouter || process.env.OPENROUTER_API_KEY;
   if (orKey) {
-    const model = keys.openrouterModel || process.env.OPENROUTER_MODEL || DEFAULT_MODELS.openrouter;
+    const model =
+      keys.openrouterModel || process.env.OPENROUTER_MODEL || DEFAULT_MODELS.openrouter;
     out.push({ provider: "openrouter", model, label: `openrouter/${model}`, secret: orKey });
   }
   const gemKey = keys.gemini || process.env.GEMINI_API_KEY;
@@ -66,8 +72,8 @@ export function configuredProviders(keys: KeyBag = {}): ResolvedTarget[] {
 }
 
 // Stable hash → spread agents round-robin over every configured provider.
-export function targetFor(agentId: string, keys: KeyBag = {}): ResolvedTarget | null {
-  const providers = configuredProviders(keys);
+export function targetFor(agentId: string, keys: KeyBag = {}, enabled = true): ResolvedTarget | null {
+  const providers = configuredProviders(keys, enabled);
   if (!providers.length) return null;
   let h = 0;
   for (const ch of agentId) h = (h * 31 + ch.charCodeAt(0)) >>> 0;

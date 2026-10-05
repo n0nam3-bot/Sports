@@ -46,6 +46,14 @@ export interface PlayerLeader {
   perGame: number | null; // normalized per-game rate
 }
 
+export interface ProbableInfo {
+  role: string;
+  name: string;
+  shortName: string;
+  position: string;
+  record: string;
+}
+
 export interface RestInfo {
   homeDays: number;
   awayDays: number;
@@ -73,6 +81,24 @@ export interface GameInfo {
   injuries: InjuryInfo[];
   rest: RestInfo | null;
   leaders: PlayerLeader[];
+  context: {
+    homeProbables: ProbableInfo[];
+    awayProbables: ProbableInfo[];
+    notes: string[];
+    lineupPosted: boolean;
+  };
+  /** combat sports only */
+  combat?: {
+    weightClass: string;
+    scheduledRounds: number;
+    titleFight: boolean;
+    cardSegment: string; // "Main Event" | "Main Card" | "Prelims"
+    /** model-derived fair prices — ESPN publishes no MMA sportsbook lines */
+    model: CombatModel & { statsUsed?: boolean; summary?: string };
+    eventId: string;
+    competitionId: string;
+    league: string;
+  };
 }
 
 export const SPORT_PATHS: Record<string, { label: string; path: string }> = {
@@ -82,7 +108,15 @@ export const SPORT_PATHS: Record<string, { label: string; path: string }> = {
   ncaab: { label: "NCAAB", path: "basketball/mens-college-basketball" },
   mlb: { label: "MLB", path: "baseball/mlb" },
   nhl: { label: "NHL", path: "hockey/nhl" },
+  ufc: { label: "UFC", path: "mma/ufc" },
+  dwcs: { label: "DWCS", path: "mma/ufc" }, // ESPN files DWCS under UFC
+  pfl: { label: "PFL", path: "mma/pfl" },
 };
+
+/** Combat sports have no spreads/totals — they get their own market model. */
+export const COMBAT_SPORTS = new Set(["ufc", "dwcs", "pfl"]);
+
+import { combatModel, type CombatModel } from "./combat";
 
 const API = "https://site.api.espn.com/apis/site/v2/sports";
 
@@ -380,6 +414,29 @@ export function parseLeaders(comp: any, home: TeamInfo, away: TeamInfo): PlayerL
       if (perGame != null && range && (perGame < range[0] || perGame > range[1])) {
         perGame = null; // implausible → don't build a prop off it
       }
+      // "15/27, 297 YDS, 4 TD" → touchdown counts ride along with yardage
+      const tdMatch = String(L?.displayValue ?? "").match(/(\d+)\s*TD/i);
+      if (tdMatch && (stat === "PASS_YDS" || stat === "RUSH_YDS" || stat === "REC_YDS")) {
+        const tds = Number(tdMatch[1]);
+        // Early-season TD rates are tiny samples. Regress toward a modest
+        // baseline (0.45/g skill players, 1.4/g passers) with a 4-game prior
+        // so a hot two-week start can't imply a 70% anytime scorer.
+        const priorRate = stat === "PASS_YDS" ? 1.4 : 0.45;
+        const priorGames = 4;
+        const tdPerGame =
+          gp > 0 ? (tds + priorRate * priorGames) / (gp + priorGames) : null;
+        if (tdPerGame != null && tdPerGame > 0 && tdPerGame < 4) {
+          out.push({
+            athlete: ath.displayName,
+            teamAbbr: abbrByTeamId.get(teamId) ?? "",
+            position: ath?.position?.abbreviation ?? "",
+            category: key,
+            stat: stat === "PASS_YDS" ? "PASS_TD" : "ANY_TD",
+            seasonValue: tds,
+            perGame: Math.round(tdPerGame * 100) / 100,
+          });
+        }
+      }
       out.push({
         athlete: ath.displayName,
         teamAbbr: abbrByTeamId.get(teamId) ?? "",
@@ -392,6 +449,19 @@ export function parseLeaders(comp: any, home: TeamInfo, away: TeamInfo): PlayerL
     }
   }
   return out;
+}
+
+function parseProbables(list: any[]): ProbableInfo[] {
+  return (list ?? []).map((p) => ({
+    role: p?.displayName ?? p?.name ?? "Probable",
+    name: p?.athlete?.displayName ?? p?.athlete?.fullName ?? "TBA",
+    shortName: p?.athlete?.shortName ?? p?.athlete?.displayName ?? "TBA",
+    position:
+      typeof p?.athlete?.position === "string"
+        ? p.athlete.position
+        : p?.athlete?.position?.abbreviation ?? "",
+    record: p?.record ?? "",
+  }));
 }
 
 function parseEvent(evt: any, sport: string): GameInfo {
@@ -421,7 +491,103 @@ function parseEvent(evt: any, sport: string): GameInfo {
     injuries: [],
     rest: null,
     leaders: parseLeaders(comp, home, away),
+    context: {
+      homeProbables: parseProbables(homeC?.probables ?? []),
+      awayProbables: parseProbables(awayC?.probables ?? []),
+      notes: (comp?.notes ?? []).map((n: any) => n?.headline).filter(Boolean),
+      lineupPosted: false,
+    },
   };
+}
+
+// ---------- combat sports ----------
+// An MMA "event" is a whole card; each `competition` is one bout. We flatten
+// bouts into individual analyzable games so the cluster prices every fight.
+
+function fighterInfo(c: any, fallbackIdx: number): TeamInfo {
+  const a = c?.athlete ?? {};
+  const full: string = a.displayName ?? a.fullName ?? `Fighter ${fallbackIdx + 1}`;
+  const last = full.split(" ").slice(-1)[0] ?? full;
+  const rec = (c?.records ?? [])[0]?.summary ?? "0-0-0";
+  return {
+    id: String(a.id ?? c?.id ?? fallbackIdx),
+    abbr: last.slice(0, 12).toUpperCase(),
+    name: full,
+    logo: a?.flag?.href ?? a?.headshot ?? "",
+    color: "#1a2233",
+    record: rec,
+    homeRecord: "",
+    awayRecord: "",
+  };
+}
+
+function parseBout(bout: any, card: any, sport: string): GameInfo {
+  const cs: any[] = bout?.competitors ?? [];
+  const a = fighterInfo(cs[0] ?? {}, 0);
+  const b = fighterInfo(cs[1] ?? {}, 1);
+  const st = bout?.status?.type ?? {};
+  const state: "pre" | "in" | "post" =
+    st.state === "in" ? "in" : st.completed || st.state === "post" ? "post" : "pre";
+  const rounds = Number(bout?.format?.regulation?.periods ?? 3) || 3;
+  const weight = bout?.type?.abbreviation ?? bout?.type?.text ?? "Catchweight";
+  const meta = SPORT_PATHS[sport];
+  const cardId = String(card?.id ?? "");
+  const boutId = String(bout.id);
+  const league = sport === "pfl" ? "pfl" : "ufc";
+  return {
+    eventId: boutId,
+    sport,
+    sportLabel: meta?.label ?? sport.toUpperCase(),
+    name: `${a.name} vs ${b.name}`,
+    matchup: `${a.abbr} vs ${b.abbr}`,
+    startTime: bout.date ?? card?.date ?? "",
+    status: state,
+    statusDetail: st.shortDetail ?? st.detail ?? "",
+    venue: card?.venues?.[0]?.fullName ?? bout?.venue?.fullName ?? "",
+    home: b,
+    away: a,
+    odds: null, // ESPN's free combat feed carries no sportsbook lines
+    injuries: [],
+    rest: null,
+    leaders: [],
+    context: {
+      homeProbables: [],
+      awayProbables: [],
+      notes: [],
+      lineupPosted: false,
+    },
+    combat: {
+      weightClass: String(weight),
+      scheduledRounds: rounds,
+      titleFight: rounds === 5,
+      cardSegment: rounds === 5 ? "Main Card" : "Undercard",
+      model: { ...combatModel(a.record, b.record, String(weight), rounds), statsUsed: false, summary: "" },
+      eventId: cardId,
+      competitionId: boutId,
+      league,
+    },
+  };
+}
+
+/** Flattens every bout on every card that falls on the requested date. */
+function parseCombatCards(events: any[], sport: string, dateISO: string): GameInfo[] {
+  const out: GameInfo[] = [];
+  for (const card of events) {
+    const bouts: any[] = card?.competitions ?? [];
+    for (const bout of bouts) {
+      const when = String(bout?.date ?? card?.date ?? "");
+      // ESPN returns the card under several dates; keep bouts on the target day
+      // (ET calendar day, matching how slates are presented).
+      if (when) {
+        const etDay = new Date(when).toLocaleDateString("en-CA", {
+          timeZone: "America/New_York",
+        });
+        if (etDay !== dateISO) continue;
+      }
+      out.push(parseBout(bout, card, sport));
+    }
+  }
+  return out;
 }
 
 async function scoreboard(sport: string, dateISO: string): Promise<any[]> {
@@ -570,10 +736,15 @@ export async function getSlateDetailed(
 
   // ---- Stage 1 (mandatory): scoreboards, all sports in parallel ----
   const boards = await Promise.all(
-    sports.map(async (sport) => ({
-      sport,
-      games: (await scoreboard(sport, dateISO)).map((evt) => parseEvent(evt, sport)),
-    })),
+    sports.map(async (sport) => {
+      const raw = await scoreboard(sport, dateISO);
+      return {
+        sport,
+        games: COMBAT_SPORTS.has(sport)
+          ? parseCombatCards(raw, sport, dateISO)
+          : raw.map((evt) => parseEvent(evt, sport)),
+      };
+    }),
   );
   const games = boards.flatMap((b) => b.games);
 
@@ -581,10 +752,12 @@ export async function getSlateDetailed(
   if (withRest && left() > 2500) {
     try {
       const restBySport = await Promise.all(
-        boards.map(async (b) => ({
-          sport: b.sport,
-          days: await teamDaysBack(b.sport, dateISO, 3),
-        })),
+        boards
+          .filter((b) => !COMBAT_SPORTS.has(b.sport)) // fighters have camps, not B2Bs
+          .map(async (b) => ({
+            sport: b.sport,
+            days: await teamDaysBack(b.sport, dateISO, 3),
+          })),
       );
       const map = new Map(restBySport.map((r) => [r.sport, r.days]));
       for (const g of games) {
@@ -601,7 +774,7 @@ export async function getSlateDetailed(
   // ---- Stage 3 (optional): injuries, budget-aware ----
   if (withInjuries) {
     const targets = games
-      .filter((g) => g.status === "pre")
+      .filter((g) => g.status === "pre" && !COMBAT_SPORTS.has(g.sport))
       .sort((a, b) => new Date(a.startTime || 0).getTime() - new Date(b.startTime || 0).getTime())
       .slice(0, maxInjury);
     let done = 0;
@@ -615,6 +788,16 @@ export async function getSlateDetailed(
             g.odds = parseOdds(sum.pickcenter, g.home.abbr, g.away.abbr, g.sport);
           if (!g.leaders.length && sum.leaders)
             g.leaders = parseLeaders({ leaders: sum.leaders }, g.home, g.away);
+          const prePlayers = sum?.boxscore?.players ?? [];
+          g.context.lineupPosted = prePlayers.some(
+            (t: any) => (t?.statistics ?? []).length > 0 || (t?.athletes ?? []).length > 0,
+          );
+          const note = g.context.lineupPosted
+            ? "starting lineups posted"
+            : g.sport === "mlb"
+              ? "batting lineups pending"
+              : "starting lineups pending";
+          if (!g.context.notes.includes(note)) g.context.notes.unshift(note);
         }
         done++;
         return g;
@@ -651,6 +834,12 @@ export interface FinalScore {
   /** Per-period scoring: quarters / innings / periods, in order. */
   homeLine: number[];
   awayLine: number[];
+  /** combat sports resolution */
+  winnerName?: string;
+  endRound?: number;
+  elapsedMinutes?: number;
+  scheduledRounds?: number;
+  wentDistance?: boolean;
 }
 
 export async function getFinals(
@@ -658,6 +847,44 @@ export async function getFinals(
   sport: string,
 ): Promise<FinalScore[]> {
   const events = await scoreboard(sport, dateISO);
+
+  if (COMBAT_SPORTS.has(sport)) {
+    const out: FinalScore[] = [];
+    for (const card of events) {
+      for (const bout of card?.competitions ?? []) {
+        const st = bout?.status ?? {};
+        const type = st?.type ?? {};
+        const cs: any[] = bout?.competitors ?? [];
+        const a = fighterInfo(cs[0] ?? {}, 0);
+        const b = fighterInfo(cs[1] ?? {}, 1);
+        const winnerC = cs.find((c) => c?.winner === true);
+        const rounds = Number(bout?.format?.regulation?.periods ?? 3) || 3;
+        const endRound = Number(st?.period ?? 0) || 0;
+        // ESPN reports the stoppage time as elapsed within the final round.
+        const clk = String(st?.displayClock ?? "0:00");
+        const [mm, ss] = clk.split(":").map((n) => Number(n) || 0);
+        const elapsed = Math.max(0, (endRound - 1) * 5 + mm + ss / 60);
+        const wentDistance = endRound >= rounds && mm >= 5;
+        out.push({
+          eventId: String(bout.id),
+          status: type.state === "in" ? "in" : type.completed ? "post" : "pre",
+          homeAbbr: b.abbr,
+          awayAbbr: a.abbr,
+          homeScore: winnerC && fighterInfo(winnerC, 1).abbr === b.abbr ? 1 : 0,
+          awayScore: winnerC && fighterInfo(winnerC, 0).abbr === a.abbr ? 1 : 0,
+          homeLine: [],
+          awayLine: [],
+          winnerName: winnerC ? fighterInfo(winnerC, 0).name : undefined,
+          endRound,
+          elapsedMinutes: Math.round(elapsed * 100) / 100,
+          scheduledRounds: rounds,
+          wentDistance,
+        });
+      }
+    }
+    return out;
+  }
+
   return events.map((evt) => {
     const comp = evt?.competitions?.[0] ?? {};
     const cs: any[] = comp.competitors ?? [];
@@ -683,21 +910,32 @@ export async function getFinals(
 
 // ---------- boxscore player stats (prop grading) ----------
 
-const STAT_ALIASES: Record<string, string[]> = {
-  PTS: ["PTS"],
-  REB: ["REB"],
-  AST: ["AST"],
-  THREES: ["3PT", "3PM"],
-  STL: ["STL"],
-  BLK: ["BLK"],
-  PASS_YDS: ["YDS"], // resolved within "passing" group
-  RUSH_YDS: ["YDS"], // within "rushing"
-  REC_YDS: ["YDS"], // within "receiving"
-  REC: ["REC"],
-  HITS: ["H"],
-  GOALS: ["G"],
-  SHOTS: ["STOT", "S"],
-  STRIKEOUTS: ["SO", "K"],
+// Keys that ESPN uses in boxscore group `keys` arrays. We check both the
+// camelCase canonical key AND the short label so we survive ESPN reformatting.
+const STAT_KEY_MAP: Record<string, string[]> = {
+  // NFL / NCAAF
+  PASS_YDS: ["passingYards", "YDS"],
+  PASS_TD: ["passingTouchdowns", "TD"],
+  RUSH_YDS: ["rushingYards", "YDS"],
+  RUSH_TD: ["rushingTouchdowns", "TD"],
+  REC_YDS: ["receivingYards", "YDS"],
+  REC_TD: ["receivingTouchdowns", "TD"],
+  REC: ["receptions", "REC"],
+  // ANY_TD — look for total touchdowns from all groups
+  ANY_TD: ["passingTouchdowns", "rushingTouchdowns", "receivingTouchdowns", "TD"],
+  // NBA / NCAAB
+  PTS: ["points", "PTS"],
+  REB: ["rebounds", "totalRebounds", "REB"],
+  AST: ["assists", "AST"],
+  THREES: ["threePointersMade", "3PM", "3PT"],
+  STL: ["steals", "STL"],
+  BLK: ["blocks", "BLK"],
+  // NHL
+  GOALS: ["goals", "G"],
+  SHOTS: ["shotsOnGoal", "STOT", "SOG", "S"],
+  // MLB
+  HITS: ["hits", "H"],
+  STRIKEOUTS: ["strikeouts", "SO", "K"],
 };
 
 function normName(s: string): string {
@@ -718,34 +956,76 @@ export async function lookupPlayerStat(
   const sum = await summary(sport, eventId);
   const groups = sum?.boxscore?.players ?? [];
   const target = normName(player);
-  const wantGroup =
-    stat === "PASS_YDS"
-      ? "passing"
-      : stat === "RUSH_YDS"
-        ? "rushing"
-        : stat === "REC_YDS" || stat === "REC"
-          ? "receiving"
-          : null;
+
+  // Which ESPN boxscore group(s) to search in for this stat.
+  const wantGroups: string[] | null =
+    stat === "PASS_YDS" || stat === "PASS_TD" ? ["passing"] :
+    stat === "RUSH_YDS" || stat === "RUSH_TD" ? ["rushing"] :
+    stat === "REC_YDS" || stat === "REC" || stat === "REC_TD" ? ["receiving"] :
+    stat === "ANY_TD" ? ["passing", "rushing", "receiving"] :
+    null; // search all groups
+
+  const aliases = STAT_KEY_MAP[stat] ?? [stat];
+  let tdTotal = 0;
+  let foundPlayer = false;
+
   for (const teamBlock of groups) {
     for (const grp of teamBlock?.statistics ?? []) {
       const gname = String(grp?.name ?? "").toLowerCase();
-      if (wantGroup && !gname.includes(wantGroup.replace("_yds", ""))) continue;
-      const keys: string[] = grp?.keys ?? grp?.labels ?? [];
+      if (wantGroups && !wantGroups.some((g) => gname.includes(g))) continue;
+
+      // ESPN uses both `keys` (camelCase names) and `labels` (short display)
+      const keys: string[] = grp?.keys ?? [];
+      const labels: string[] = grp?.labels ?? [];
+
       for (const ath of grp?.athletes ?? []) {
         const name = normName(ath?.athlete?.displayName ?? "");
-        if (!name || (name !== target && !name.includes(target) && !target.includes(name)))
-          continue;
+        if (!name) continue;
+        // Fuzzy name match: either direction of inclusion
+        const nameMatch =
+          name === target ||
+          name.includes(target) ||
+          target.includes(name) ||
+          // Also try last-name only match for short names like "J. Allen"
+          (target.split(" ").pop()?.length ?? 0) > 3 && name.includes(target.split(" ").pop()!);
+        if (!nameMatch) continue;
+
         const stats: string[] = ath?.stats ?? [];
-        const aliases = STAT_ALIASES[stat] ?? [stat];
+
+        // For ANY_TD: sum TDs from all groups for this player
+        if (stat === "ANY_TD") {
+          for (const alias of ["rushingTouchdowns", "receivingTouchdowns", "passingTouchdowns", "TD"]) {
+            let idx = keys.findIndex((k) => k === alias);
+            if (idx < 0) idx = labels.findIndex((l) => l.toUpperCase() === alias.toUpperCase());
+            if (idx >= 0 && stats[idx] != null) {
+              const n = parseFloat(String(stats[idx]).replace(/[^\d]/g, "")) || 0;
+              tdTotal += n;
+              foundPlayer = true;
+              break; // one TD column per group
+            }
+          }
+          continue;
+        }
+
+        // Regular stat lookup: check keys first (canonical), then labels
         for (const alias of aliases) {
-          const i = keys.findIndex((k) => String(k).toUpperCase() === alias);
-          if (i >= 0 && stats[i] != null) {
-            const n = parseFloat(String(stats[i]).replace(/[^\d.-]/g, ""));
+          let idx = keys.findIndex((k) => k === alias || k.toLowerCase() === alias.toLowerCase());
+          if (idx < 0) {
+            idx = labels.findIndex(
+              (l) => l.toUpperCase() === alias.toUpperCase() || l.replace(/[^a-zA-Z]/g, "").toUpperCase() === alias,
+            );
+          }
+          if (idx >= 0 && stats[idx] != null) {
+            // Handle compound stats like "32/52" — take first number
+            const raw = String(stats[idx]);
+            const n = parseFloat(raw.split("/")[0].replace(/[^\d.-]/g, ""));
             if (Number.isFinite(n)) return n;
           }
         }
       }
     }
   }
+
+  if (stat === "ANY_TD" && foundPlayer) return tdTotal;
   return null;
 }

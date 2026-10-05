@@ -16,6 +16,8 @@ export interface KeyVault {
   ollamaModel: string;
 }
 
+export type LlmMode = "off" | "on";
+
 export const EMPTY_VAULT: KeyVault = {
   gemini: "",
   xai: "",
@@ -29,6 +31,7 @@ export const EMPTY_VAULT: KeyVault = {
 
 const STORAGE_KEY = "neonslip.vault.v1";
 const OWNER_KEY = "neonslip.owner.v1";
+const LLM_MODE_KEY = "neonslip.llm-mode.v1";
 
 /**
  * Private workspace id for this browser. Everything the cluster produces for
@@ -78,6 +81,24 @@ export function clearVault(): void {
   window.localStorage.removeItem(STORAGE_KEY);
 }
 
+export function loadLlmMode(): LlmMode {
+  if (typeof window === "undefined") return "off";
+  try {
+    return window.localStorage.getItem(LLM_MODE_KEY) === "on" ? "on" : "off";
+  } catch {
+    return "off";
+  }
+}
+
+export function saveLlmMode(mode: LlmMode): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(LLM_MODE_KEY, mode);
+  } catch {
+    /* ignore */
+  }
+}
+
 export function vaultActive(v: KeyVault): boolean {
   return !!(v.gemini || v.xai || v.openrouter || v.ollamaUrl);
 }
@@ -100,6 +121,7 @@ export async function vaultFetch(
   input: string,
   init: RequestInit = {},
   vault?: KeyVault,
+  opts: { llmMode?: LlmMode } = {},
 ): Promise<Response> {
   const v = vault ?? loadVault();
   const encoded = encodeVault(v);
@@ -107,5 +129,7 @@ export async function vaultFetch(
   if (encoded) headers.set("x-neonslip-keys", encoded);
   const owner = getOwnerId();
   if (owner) headers.set("x-neonslip-owner", owner);
+  const mode = opts.llmMode ?? loadLlmMode();
+  headers.set("x-neonslip-llm", mode);
   return fetch(input, { ...init, headers });
 }

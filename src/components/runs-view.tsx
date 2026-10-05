@@ -2,10 +2,11 @@
 
 import { useState } from "react";
 import {
-  ChevronDown, CircleCheck, RefreshCw, ScrollText, Target, TrendingUp, Vault,
+  ChevronDown, CircleCheck, Globe, Lock, RefreshCw, ScrollText, Star, Target, TrendingUp, Vault,
 } from "lucide-react";
 import type { PredC, RunC } from "./types";
 import { CategoryChip, Chip, OutcomeChip, Panel, cx } from "./ui";
+import { vaultFetch, loadLlmMode } from "./keys";
 
 function profit(p: PredC): number {
   if (p.outcome === "win") return p.units * (p.odds > 0 ? p.odds / 100 : 100 / -p.odds);
@@ -25,6 +26,20 @@ function StatBlock({ label, value, tone }: { label: string; value: string; tone:
 export default function RunsView({ runs, grade }: { runs: RunC[]; grade: () => Promise<void> | void }) {
   const [openId, setOpenId] = useState<number | null>(runs[0]?.id ?? null);
   const [syncing, setSyncing] = useState(false);
+  const [publishing, setPublishing] = useState<number | null>(null);
+
+  async function togglePublic(runId: number, currentlyPublic: boolean) {
+    setPublishing(runId);
+    try {
+      await vaultFetch("/api/runs/public", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ runId, public: !currentlyPublic }),
+      }, undefined, { llmMode: loadLlmMode() });
+    } finally {
+      setPublishing(null);
+    }
+  }
 
   const allPreds = runs.flatMap((r) => r.predictions);
   const graded = allPreds.filter((p) => p.outcome !== "pending");
@@ -104,6 +119,22 @@ export default function RunsView({ runs, grade }: { runs: RunC[]; grade: () => P
                 </span>
                 <Chip tone={r.mode === "llm" ? "green" : "cyan"}>{r.mode === "llm" ? "llm swarm" : "quant core"}</Chip>
                 <Chip tone={r.status === "completed" ? "green" : r.status === "running" ? "amber" : "red"}>{r.status}</Chip>
+                {r.status === "completed" && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); void togglePublic(r.id, !!r.isPublic); }}
+                    disabled={publishing === r.id}
+                    className={cx(
+                      "clip-tag flex items-center gap-1 border px-1.5 py-px font-mono text-[8.5px] font-bold uppercase tracking-[0.12em] transition-all",
+                      r.isPublic
+                        ? "border-[#37ff8b]/40 bg-[#37ff8b]/10 text-[#37ff8b]"
+                        : "border-white/15 bg-white/[0.04] text-[#5f7089] hover:border-[#37ff8b]/30 hover:text-[#37ff8b]",
+                    )}
+                    title={r.isPublic ? "public — click to make private" : "private — click to share publicly"}
+                  >
+                    {r.isPublic ? <Globe className="h-2.5 w-2.5" /> : <Lock className="h-2.5 w-2.5" />}
+                    {r.isPublic ? "public" : "private"}
+                  </button>
+                )}
                 <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-[#5f7089]">
                   {r.gamesAnalyzed} analyzed · {r.gamesSkipped} skipped
                 </span>
@@ -153,20 +184,33 @@ export default function RunsView({ runs, grade }: { runs: RunC[]; grade: () => P
                         </thead>
                         <tbody>
                           {rp.map((p) => (
-                            <tr key={p.id} className="border-t border-white/5 text-[#b8c6da]">
-                              <td className="py-2 pr-3 text-[#3d4c63]">{p.sortOrder + 1}</td>
-                              <td className="py-2 pr-3"><CategoryChip category={p.category} /></td>
-                              <td className="max-w-[260px] py-2 pr-3">
-                                <span className="font-sans text-[12px] font-semibold text-[#e8f1fb]">{p.pick}</span>
-                              </td>
-                              <td className="py-2 pr-3 text-[#8fa3bd]">{p.matchup}</td>
-                              <td className="py-2 pr-3 text-right text-[#ffb020]">{p.odds > 0 ? `+${p.odds}` : p.odds}</td>
-                              <td className="py-2 pr-3 text-right text-[#39d5ff]">{p.confidence.toFixed(0)}</td>
-                              <td className="py-2 pr-3 text-right">{p.units.toFixed(1)}u</td>
-                              <td className="py-2 pr-3 text-right"><OutcomeChip outcome={p.outcome} /></td>
-                              <td className="py-2 text-right text-[#5f7089]">{p.finalScore ?? "—"}</td>
-                            </tr>
-                          ))}
+                             <tr
+                               key={p.id}
+                               className={cx(
+                                 "border-t border-white/5",
+                                 p.isDuplicate ? "text-[#5f7089] opacity-65" : "text-[#b8c6da]",
+                               )}
+                             >
+                               <td className="py-2 pr-3 text-[#3d4c63]">
+                                 {p.isDuplicate && p.canonRunId
+                                   ? <span title={`same bet as run #${p.canonRunId} — not counted again`}><Star className="inline h-3 w-3 text-[#ffb020]" /></span>
+                                   : p.sortOrder + 1}
+                               </td>
+                               <td className="py-2 pr-3"><CategoryChip category={p.category} /></td>
+                               <td className="max-w-[260px] py-2 pr-3">
+                                 <span className={cx("font-sans text-[12px] font-semibold", p.isDuplicate ? "text-[#5f7089] line-through" : "text-[#e8f1fb]")}>{p.pick}</span>
+                                 {p.isDuplicate && p.canonRunId && (
+                                   <span className="ml-2 font-mono text-[8.5px] uppercase tracking-wider text-[#8fa3bd]">graded on #{p.canonRunId}</span>
+                                 )}
+                               </td>
+                               <td className="py-2 pr-3 text-[#8fa3bd]">{p.matchup}</td>
+                               <td className="py-2 pr-3 text-right text-[#ffb020]">{p.odds > 0 ? `+${p.odds}` : p.odds}</td>
+                               <td className="py-2 pr-3 text-right text-[#39d5ff]">{p.confidence.toFixed(0)}</td>
+                               <td className="py-2 pr-3 text-right">{p.units.toFixed(1)}u</td>
+                               <td className="py-2 pr-3 text-right"><OutcomeChip outcome={p.outcome} /></td>
+                               <td className="py-2 text-right text-[#5f7089]">{p.finalScore ?? "—"}</td>
+                             </tr>
+                           ))}
                         </tbody>
                       </table>
                     </div>
