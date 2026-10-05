@@ -1,6 +1,6 @@
 import { db } from "@/db";
 import { sql } from "drizzle-orm";
-import { configuredProviders } from "@/lib/llm";
+import { configuredProviders, llmEnabledFromRequest } from "@/lib/llm";
 import { fetchDiag, getSlateDetailed } from "@/lib/espn";
 
 export const dynamic = "force-dynamic";
@@ -8,7 +8,7 @@ export const maxDuration = 60;
 
 // Mobile-friendly self-test: open /api/diag in a browser to see exactly which
 // subsystem is failing (database, sports feed, or LLM providers).
-export async function GET() {
+export async function GET(req: Request) {
   const report: Record<string, unknown> = {
     time: new Date().toISOString(),
     host: process.env.VERCEL ? "vercel" : "node",
@@ -61,7 +61,7 @@ export async function GET() {
   };
 
   // 3. LLM providers (entirely optional)
-  const providers = configuredProviders();
+  const providers = configuredProviders({}, llmEnabledFromRequest(req));
   report.llm = {
     configured: providers.length,
     providers: providers.map((p) => p.label),
