@@ -46,6 +46,14 @@ export interface PlayerLeader {
   perGame: number | null; // normalized per-game rate
 }
 
+export interface ProbableInfo {
+  role: string;
+  name: string;
+  shortName: string;
+  position: string;
+  record: string;
+}
+
 export interface RestInfo {
   homeDays: number;
   awayDays: number;
@@ -73,14 +81,23 @@ export interface GameInfo {
   injuries: InjuryInfo[];
   rest: RestInfo | null;
   leaders: PlayerLeader[];
+  context: {
+    homeProbables: ProbableInfo[];
+    awayProbables: ProbableInfo[];
+    notes: string[];
+    lineupPosted: boolean;
+  };
   /** combat sports only */
   combat?: {
     weightClass: string;
     scheduledRounds: number;
     titleFight: boolean;
     cardSegment: string; // "Main Event" | "Main Card" | "Prelims"
-    /** model-derived fair prices — ESPN publishes no MMA lines */
-    model: CombatModel;
+    /** model-derived fair prices — ESPN publishes no MMA sportsbook lines */
+    model: CombatModel & { statsUsed?: boolean; summary?: string };
+    eventId: string;
+    competitionId: string;
+    league: string;
   };
 }
 
@@ -434,6 +451,19 @@ export function parseLeaders(comp: any, home: TeamInfo, away: TeamInfo): PlayerL
   return out;
 }
 
+function parseProbables(list: any[]): ProbableInfo[] {
+  return (list ?? []).map((p) => ({
+    role: p?.displayName ?? p?.name ?? "Probable",
+    name: p?.athlete?.displayName ?? p?.athlete?.fullName ?? "TBA",
+    shortName: p?.athlete?.shortName ?? p?.athlete?.displayName ?? "TBA",
+    position:
+      typeof p?.athlete?.position === "string"
+        ? p.athlete.position
+        : p?.athlete?.position?.abbreviation ?? "",
+    record: p?.record ?? "",
+  }));
+}
+
 function parseEvent(evt: any, sport: string): GameInfo {
   const comp = evt?.competitions?.[0] ?? {};
   const competitors: any[] = comp.competitors ?? [];
@@ -461,6 +491,12 @@ function parseEvent(evt: any, sport: string): GameInfo {
     injuries: [],
     rest: null,
     leaders: parseLeaders(comp, home, away),
+    context: {
+      homeProbables: parseProbables(homeC?.probables ?? []),
+      awayProbables: parseProbables(awayC?.probables ?? []),
+      notes: (comp?.notes ?? []).map((n: any) => n?.headline).filter(Boolean),
+      lineupPosted: false,
+    },
   };
 }
 
@@ -495,8 +531,11 @@ function parseBout(bout: any, card: any, sport: string): GameInfo {
   const rounds = Number(bout?.format?.regulation?.periods ?? 3) || 3;
   const weight = bout?.type?.abbreviation ?? bout?.type?.text ?? "Catchweight";
   const meta = SPORT_PATHS[sport];
+  const cardId = String(card?.id ?? "");
+  const boutId = String(bout.id);
+  const league = sport === "pfl" ? "pfl" : "ufc";
   return {
-    eventId: String(bout.id),
+    eventId: boutId,
     sport,
     sportLabel: meta?.label ?? sport.toUpperCase(),
     name: `${a.name} vs ${b.name}`,
@@ -507,16 +546,25 @@ function parseBout(bout: any, card: any, sport: string): GameInfo {
     venue: card?.venues?.[0]?.fullName ?? bout?.venue?.fullName ?? "",
     home: b,
     away: a,
-    odds: null, // ESPN's free combat feed carries no betting lines
+    odds: null, // ESPN's free combat feed carries no sportsbook lines
     injuries: [],
     rest: null,
     leaders: [],
+    context: {
+      homeProbables: [],
+      awayProbables: [],
+      notes: [],
+      lineupPosted: false,
+    },
     combat: {
       weightClass: String(weight),
       scheduledRounds: rounds,
       titleFight: rounds === 5,
       cardSegment: rounds === 5 ? "Main Card" : "Undercard",
-      model: combatModel(a.record, b.record, String(weight), rounds),
+      model: { ...combatModel(a.record, b.record, String(weight), rounds), statsUsed: false, summary: "" },
+      eventId: cardId,
+      competitionId: boutId,
+      league,
     },
   };
 }
@@ -740,6 +788,16 @@ export async function getSlateDetailed(
             g.odds = parseOdds(sum.pickcenter, g.home.abbr, g.away.abbr, g.sport);
           if (!g.leaders.length && sum.leaders)
             g.leaders = parseLeaders({ leaders: sum.leaders }, g.home, g.away);
+          const prePlayers = sum?.boxscore?.players ?? [];
+          g.context.lineupPosted = prePlayers.some(
+            (t: any) => (t?.statistics ?? []).length > 0 || (t?.athletes ?? []).length > 0,
+          );
+          const note = g.context.lineupPosted
+            ? "starting lineups posted"
+            : g.sport === "mlb"
+              ? "batting lineups pending"
+              : "starting lineups pending";
+          if (!g.context.notes.includes(note)) g.context.notes.unshift(note);
         }
         done++;
         return g;
@@ -852,21 +910,32 @@ export async function getFinals(
 
 // ---------- boxscore player stats (prop grading) ----------
 
-const STAT_ALIASES: Record<string, string[]> = {
-  PTS: ["PTS"],
-  REB: ["REB"],
-  AST: ["AST"],
-  THREES: ["3PT", "3PM"],
-  STL: ["STL"],
-  BLK: ["BLK"],
-  PASS_YDS: ["YDS"], // resolved within "passing" group
-  RUSH_YDS: ["YDS"], // within "rushing"
-  REC_YDS: ["YDS"], // within "receiving"
-  REC: ["REC"],
-  HITS: ["H"],
-  GOALS: ["G"],
-  SHOTS: ["STOT", "S"],
-  STRIKEOUTS: ["SO", "K"],
+// Keys that ESPN uses in boxscore group `keys` arrays. We check both the
+// camelCase canonical key AND the short label so we survive ESPN reformatting.
+const STAT_KEY_MAP: Record<string, string[]> = {
+  // NFL / NCAAF
+  PASS_YDS: ["passingYards", "YDS"],
+  PASS_TD: ["passingTouchdowns", "TD"],
+  RUSH_YDS: ["rushingYards", "YDS"],
+  RUSH_TD: ["rushingTouchdowns", "TD"],
+  REC_YDS: ["receivingYards", "YDS"],
+  REC_TD: ["receivingTouchdowns", "TD"],
+  REC: ["receptions", "REC"],
+  // ANY_TD — look for total touchdowns from all groups
+  ANY_TD: ["passingTouchdowns", "rushingTouchdowns", "receivingTouchdowns", "TD"],
+  // NBA / NCAAB
+  PTS: ["points", "PTS"],
+  REB: ["rebounds", "totalRebounds", "REB"],
+  AST: ["assists", "AST"],
+  THREES: ["threePointersMade", "3PM", "3PT"],
+  STL: ["steals", "STL"],
+  BLK: ["blocks", "BLK"],
+  // NHL
+  GOALS: ["goals", "G"],
+  SHOTS: ["shotsOnGoal", "STOT", "SOG", "S"],
+  // MLB
+  HITS: ["hits", "H"],
+  STRIKEOUTS: ["strikeouts", "SO", "K"],
 };
 
 function normName(s: string): string {
@@ -887,34 +956,76 @@ export async function lookupPlayerStat(
   const sum = await summary(sport, eventId);
   const groups = sum?.boxscore?.players ?? [];
   const target = normName(player);
-  const wantGroup =
-    stat === "PASS_YDS"
-      ? "passing"
-      : stat === "RUSH_YDS"
-        ? "rushing"
-        : stat === "REC_YDS" || stat === "REC"
-          ? "receiving"
-          : null;
+
+  // Which ESPN boxscore group(s) to search in for this stat.
+  const wantGroups: string[] | null =
+    stat === "PASS_YDS" || stat === "PASS_TD" ? ["passing"] :
+    stat === "RUSH_YDS" || stat === "RUSH_TD" ? ["rushing"] :
+    stat === "REC_YDS" || stat === "REC" || stat === "REC_TD" ? ["receiving"] :
+    stat === "ANY_TD" ? ["passing", "rushing", "receiving"] :
+    null; // search all groups
+
+  const aliases = STAT_KEY_MAP[stat] ?? [stat];
+  let tdTotal = 0;
+  let foundPlayer = false;
+
   for (const teamBlock of groups) {
     for (const grp of teamBlock?.statistics ?? []) {
       const gname = String(grp?.name ?? "").toLowerCase();
-      if (wantGroup && !gname.includes(wantGroup.replace("_yds", ""))) continue;
-      const keys: string[] = grp?.keys ?? grp?.labels ?? [];
+      if (wantGroups && !wantGroups.some((g) => gname.includes(g))) continue;
+
+      // ESPN uses both `keys` (camelCase names) and `labels` (short display)
+      const keys: string[] = grp?.keys ?? [];
+      const labels: string[] = grp?.labels ?? [];
+
       for (const ath of grp?.athletes ?? []) {
         const name = normName(ath?.athlete?.displayName ?? "");
-        if (!name || (name !== target && !name.includes(target) && !target.includes(name)))
-          continue;
+        if (!name) continue;
+        // Fuzzy name match: either direction of inclusion
+        const nameMatch =
+          name === target ||
+          name.includes(target) ||
+          target.includes(name) ||
+          // Also try last-name only match for short names like "J. Allen"
+          (target.split(" ").pop()?.length ?? 0) > 3 && name.includes(target.split(" ").pop()!);
+        if (!nameMatch) continue;
+
         const stats: string[] = ath?.stats ?? [];
-        const aliases = STAT_ALIASES[stat] ?? [stat];
+
+        // For ANY_TD: sum TDs from all groups for this player
+        if (stat === "ANY_TD") {
+          for (const alias of ["rushingTouchdowns", "receivingTouchdowns", "passingTouchdowns", "TD"]) {
+            let idx = keys.findIndex((k) => k === alias);
+            if (idx < 0) idx = labels.findIndex((l) => l.toUpperCase() === alias.toUpperCase());
+            if (idx >= 0 && stats[idx] != null) {
+              const n = parseFloat(String(stats[idx]).replace(/[^\d]/g, "")) || 0;
+              tdTotal += n;
+              foundPlayer = true;
+              break; // one TD column per group
+            }
+          }
+          continue;
+        }
+
+        // Regular stat lookup: check keys first (canonical), then labels
         for (const alias of aliases) {
-          const i = keys.findIndex((k) => String(k).toUpperCase() === alias);
-          if (i >= 0 && stats[i] != null) {
-            const n = parseFloat(String(stats[i]).replace(/[^\d.-]/g, ""));
+          let idx = keys.findIndex((k) => k === alias || k.toLowerCase() === alias.toLowerCase());
+          if (idx < 0) {
+            idx = labels.findIndex(
+              (l) => l.toUpperCase() === alias.toUpperCase() || l.replace(/[^a-zA-Z]/g, "").toUpperCase() === alias,
+            );
+          }
+          if (idx >= 0 && stats[idx] != null) {
+            // Handle compound stats like "32/52" — take first number
+            const raw = String(stats[idx]);
+            const n = parseFloat(raw.split("/")[0].replace(/[^\d.-]/g, ""));
             if (Number.isFinite(n)) return n;
           }
         }
       }
     }
   }
+
+  if (stat === "ANY_TD" && foundPlayer) return tdTotal;
   return null;
 }

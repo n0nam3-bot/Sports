@@ -266,13 +266,12 @@ export async function settleAgentRatings(
 // An agent whose recent strike rate collapses rewrites its own playbook.
 async function maybeSelfImprove(row: (typeof agents.$inferSelect)): Promise<void> {
   const total = row.wins + row.losses;
-  if (total < 12) return;
+  if (total < 8) return;  // need at least 8 graded to have signal
   const rate = row.wins / total;
-  if (rate >= 0.455) return;
+  if (rate >= 0.50) return;  // fire whenever below break-even
   const imps: ImprovementEntry[] = row.improvements ?? [];
-  // cooldown: at most one rewrite per 8 graded results
-  const gradedSince = total - imps.reduce((n, i) => n + 8, 0) * 0 + imps.length * 8;
-  if (imps.length > 0 && gradedSince < 8) return;
+  // cooldown: at most one rewrite per 6 graded results
+  if (imps.length > 0 && total - (imps.length * 6) < 6) return;
 
   const directive = buildDirective(row, rate);
   const entry: ImprovementEntry = {

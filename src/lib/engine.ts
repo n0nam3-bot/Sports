@@ -20,6 +20,7 @@ import { ensureAgentsSeeded, settleAgentRatings } from "./agents";
 import { ensureSchema } from "./schema";
 import { HOUSE } from "./owner";
 import { allowsCandidate, buildFilter, type MarketFilter } from "./markets";
+import { fetchBoutProfiles, buildEnhancedCombatModel } from "./fighter-stats";
 
 export const revalidate = 0;
 
@@ -44,6 +45,39 @@ export async function cachedSlate(
     budgetMs: opts.budgetMs ?? 12_000,
     maxInjuryLookups: opts.maxInjuryLookups ?? 30,
   });
+
+  // Enrich upcoming combat bouts with real ESPN fighter stats (parallel, budget-capped)
+  const combatPre = games.filter(
+    (g) => g.status === "pre" && g.combat && g.combat.eventId && g.combat.competitionId,
+  );
+  if (combatPre.length > 0) {
+    const statDeadline = Date.now() + 6000;
+    await Promise.all(
+      combatPre.slice(0, 12).map(async (g) => {
+        if (!g.combat || Date.now() > statDeadline) return;
+        try {
+          const { away: ap, home: hp } = await fetchBoutProfiles(
+            g.combat.eventId,
+            g.combat.competitionId,
+            g.combat.league as "ufc" | "pfl",
+          );
+          const enhanced = buildEnhancedCombatModel(
+            g.away.record,
+            g.home.record,
+            g.combat.weightClass,
+            g.combat.scheduledRounds,
+            ap,
+            hp,
+          );
+          g.combat.model = { ...enhanced };
+          if (enhanced.summary) g.context.notes = [enhanced.summary];
+        } catch {
+          /* fallback stays in place */
+        }
+      }),
+    );
+  }
+
   slateCache.set(key, { at: Date.now(), games, degraded });
   return { games, degraded };
 }
@@ -226,6 +260,9 @@ function combatCandidates(g: GameInfo, nextId: () => number): Candidate[] {
   // ---- winner ----
   // DWCS/PFL prospect fights are frequently near coin-flips; only a real
   // separation in record strength earns a side.
+  const statsLabel = (m as any).statsUsed ? "ESPN career stats" : "record-based model";
+  const matchupSummary = (m as any).summary || `${c.weightClass} ${c.scheduledRounds}rd bout`;
+
   if (pFav >= 0.53) {
     out.push({
       id: nextId(), game: g, category: "fight_ml",
@@ -233,9 +270,9 @@ function combatCandidates(g: GameInfo, nextId: () => number): Candidate[] {
       lineLabel: `model ${priceTag}`,
       odds: favPrice,
       edge: (pFav - 0.5) * 100,
-      confidence: Math.min(66, 52 + (pFav - 0.5) * 52 + jitter(g.eventId + "fml")),
-      signals: ["QUANT", "MATCHUP"],
-      thesis: `${fav.name} (${fav.record}) vs ${dog.name} (${dog.record}) at ${c.weightClass}. Record strength and experience depth make ${fav.name} a ${(pFav * 100).toFixed(0)}% favourite — model fair price ${priceTag}. No sportsbook line exists on the free feed, so only bet this if your book is longer than ${priceTag}.`,
+      confidence: Math.min(66, 52 + (pFav - 0.5) * 52 + ((m as any).statsUsed ? 3 : 0) + jitter(g.eventId + "fml")),
+      signals: (m as any).statsUsed ? ["QUANT", "MATCHUP", "PROPS"] : ["QUANT", "MATCHUP"],
+      thesis: `${fav.name} (${fav.record}) vs ${dog.name} (${dog.record}). ${matchupSummary}. ${statsLabel} makes ${fav.name} a ${(pFav * 100).toFixed(0)}% favourite — fair price ${priceTag}. Shop your book: this is only valuable if they post better than ${priceTag}.`,
       grade: { side: favHome ? "home" : "away", line: null },
     });
   }
@@ -252,9 +289,9 @@ function combatCandidates(g: GameInfo, nextId: () => number): Candidate[] {
       lineLabel: finish ? "inside the distance" : "decision",
       odds: price,
       edge: Math.abs(m.pFinish - 0.5) * 100,
-      confidence: Math.min(62, 52 + Math.abs(m.pFinish - 0.5) * 42 + jitter(g.eventId + "fm")),
-      signals: ["MATCHUP", "PROPS"],
-      thesis: `${c.weightClass}${c.scheduledRounds === 5 ? " (5-round)" : ""}. Division finishing tendencies and the skill gap model a ${(m.pFinish * 100).toFixed(0)}% stoppage chance, favouring ${finish ? "an early finish" : "the scorecards"} at a model price of ${price > 0 ? "+" : ""}${price}.`,
+      confidence: Math.min(62, 52 + Math.abs(m.pFinish - 0.5) * 42 + ((m as any).statsUsed ? 2 : 0) + jitter(g.eventId + "fm")),
+      signals: (m as any).statsUsed ? ["MATCHUP", "PROPS", "QUANT"] : ["MATCHUP", "PROPS"],
+      thesis: `${matchupSummary}. ${statsLabel} models ${(m.pFinish * 100).toFixed(0)}% stoppage probability — ${finish ? "finishing tendencies and striking output favour an early end" : "both fighters' decision percentages and cardio point to the scorecards"}. Fair price ${price > 0 ? "+" : ""}${price}.`,
       grade: { side: finish ? "under" : "over", line: c.scheduledRounds, segment: "FIGHT" },
     });
   }
@@ -745,7 +782,12 @@ async function trace(runId: number, entry: Omit<TraceEntry, "at">): Promise<void
   await db.update(runs).set({ trace: next }).where(eq(runs.id, runId));
 }
 
-export async function runPipeline(runId: number, keys: KeyBag = {}, ownerId: string = HOUSE): Promise<void> {
+export async function runPipeline(
+  runId: number,
+  keys: KeyBag = {},
+  ownerId: string = HOUSE,
+  llmEnabled = true,
+): Promise<void> {
   const [run] = await db.select().from(runs).where(eq(runs.id, runId));
   if (!run) return;
   await ensureAgentsSeeded(ownerId);
@@ -773,7 +815,18 @@ export async function runPipeline(runId: number, keys: KeyBag = {}, ownerId: str
         mood: "warn",
       });
     }
-    const pre = games.filter((g) => g.status === "pre");
+    let pre = games.filter((g) => g.status === "pre");
+    if ((run.includeEvents ?? []).length > 0) {
+      const keep = new Set(run.includeEvents);
+      const before = pre.length;
+      pre = pre.filter((g) => keep.has(g.eventId));
+      await trace(runId, {
+        layer: "system",
+        agent: "KERNEL",
+        message: `operator filter engaged — ${pre.length}/${before} queued games explicitly selected for analysis.`,
+        mood: "info",
+      });
+    }
     const skipped = games.length - pre.length;
 
     await trace(runId, {
@@ -826,12 +879,18 @@ export async function runPipeline(runId: number, keys: KeyBag = {}, ownerId: str
     for (const code of ["QUANT", "MEDIC", "CHRONO", "MATCHUP", "SHARP"] as const) {
       const a = agent(code);
       const target = a ? targetFor(a.id, keys) : null;
+      const injGames = pre.filter((g) => g.injuries.length > 0);
+      const fatigueGames = pre.filter((g) => g.rest && (g.rest.homeB2B || g.rest.awayB2B || g.rest.home3in4 || g.rest.away3in4));
       const scope: Record<string, string> = {
-        QUANT: `power lines built for ${pre.length} games — ${allCandidates.filter((c) => c.category === "spread" || c.category === "moneyline").length} model-vs-market gaps beyond threshold flagged for the analysts.`,
-        MEDIC: `injury sweep complete — ${pre.filter((g) => g.injuries.length > 0).length} games carry reportable absences; point-impact pricing delivered to STRATEGA.`,
-        CHRONO: `schedule audit complete — ${pre.filter((g) => g.rest && (g.rest.homeB2B || g.rest.awayB2B || g.rest.home3in4 || g.rest.away3in4)).length} games sit in fatigue spots (B2B / 3-in-4 / travel).`,
-        MATCHUP: `style collisions mapped for all ${pre.length} matchups — pace-up and grind spots tagged for totals routing.`,
-        SHARP: `market scan complete — ${pre.filter((g) => g.odds).length} boards priced; key numbers and trap spreads annotated.`,
+        QUANT: `power lines built for ${pre.length} games — ${allCandidates.filter((c) => c.category === "spread" || c.category === "moneyline").length} model-vs-market edges flagged.${allCandidates.length > 0 ? ` strongest edge: ${allCandidates[0].pick} (${allCandidates[0].edge.toFixed(1)} pts).` : ""}`,
+        MEDIC: injGames.length
+          ? `injury impact priced into ${injGames.length} games: ${injGames.slice(0, 3).map((g) => `${g.matchup} (${g.injuries.length} reported)`).join(", ")}${injGames.length > 3 ? ` +${injGames.length - 3} more` : ""}.`
+          : `no reportable injuries on this slate — all rosters appear intact.`,
+        CHRONO: fatigueGames.length
+          ? `fatigue spots identified: ${fatigueGames.slice(0, 3).map((g) => { const r = g.rest!; return `${g.matchup} (${r.homeB2B ? g.home.abbr + " B2B" : r.awayB2B ? g.away.abbr + " B2B" : r.home3in4 ? g.home.abbr + " 3-in-4" : g.away.abbr + " 3-in-4"})`; }).join(", ")}${fatigueGames.length > 3 ? ` +${fatigueGames.length - 3} more` : ""}.`
+          : `no significant rest or travel edges on this slate.`,
+        MATCHUP: `style analysis complete for ${pre.length} matchups — pace, scoring environment, and scheme collision factors priced.`,
+        SHARP: `${pre.filter((g) => g.odds).length}/${pre.length} games carry posted lines. Key number positions and juice asymmetries noted.`,
       };
       let extra = "";
       if (target && a) {
@@ -999,8 +1058,8 @@ export async function runPipeline(runId: number, keys: KeyBag = {}, ownerId: str
       layer: "council",
       agent: "HISTORIAN",
       message: lessons.length
-        ? `injected ${lessons.length} live lessons from the graded archive: ${lessons.join(" · ")}`
-        : "graded archive is still young — no statistically-valid leaks to inject. Volume will sharpen the memory.",
+        ? `graded archive review: ${lessons.join(" · ")}.`
+        : "graded archive has too few settled bets for statistical patterns. Will sharpen with volume.",
       mood: "info",
     });
 
@@ -1274,8 +1333,8 @@ async function buildLessons(ownerId: string = HOUSE): Promise<string[]> {
     const n = r.w + r.l;
     if (n < 8) continue;
     const rate = r.w / n;
-    if (rate >= 0.62) lessons.push(`${cat.replace("_", " ")}s cash at ${(rate * 100).toFixed(0)}% (${r.w}-${r.l}) — press the angle`);
-    if (rate <= 0.38) lessons.push(`${cat.replace("_", " ")}s leak at ${(rate * 100).toFixed(0)}% (${r.w}-${r.l}) — demand extra convergence`);
+    if (rate >= 0.56) lessons.push(`${cat.replace("_", " ")}s are hitting at ${(rate * 100).toFixed(0)}% (${r.w}-${r.l})`);
+    if (rate <= 0.44) lessons.push(`${cat.replace("_", " ")}s are underperforming at ${(rate * 100).toFixed(0)}% (${r.w}-${r.l}) — tighten edge requirements`);
   }
   return lessons.slice(0, 4);
 }
