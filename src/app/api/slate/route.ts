@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { cachedSlate } from "@/lib/engine";
-import { configuredProviders, keysFromRequest } from "@/lib/llm";
+import { configuredProviders, keysFromRequest, llmEnabledFromRequest } from "@/lib/llm";
 import { SPORT_PATHS } from "@/lib/espn";
 
 export const dynamic = "force-dynamic";
@@ -29,7 +29,7 @@ export async function GET(req: NextRequest) {
       sports,
       games,
       degraded,
-      providers: configuredProviders(keysFromRequest(req)).map((p) => p.label),
+      providers: configuredProviders(keysFromRequest(req), llmEnabledFromRequest(req)).map((p) => p.label),
       counts: {
         total: games.length,
         pre: games.filter((g) => g.status === "pre").length,
