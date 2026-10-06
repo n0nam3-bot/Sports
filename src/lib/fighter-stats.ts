@@ -141,6 +141,8 @@ export async function fetchBoutProfiles(
  * Falls back to record-only model when stats are unavailable.
  */
 export interface EnhancedCombatModel {
+  pace: string;
+  cardio: string;
   pHome: number;
   pAway: number;
   fairHomeML: number;
@@ -239,12 +241,19 @@ export function buildEnhancedCombatModel(
           : `both work takedowns (${awayProfile.takedownAvg.toFixed(1)} vs ${homeProfile.takedownAvg.toFixed(1)} per 15min)`
       : "neither fighter shows significant wrestling volume";
 
+    // Pace & Cardio evaluation
+    const combinedSLpM = awayProfile.strikeLPM + homeProfile.strikeLPM;
+    const pace = combinedSLpM > 9 ? "High pace" : combinedSLpM > 6.5 ? "Moderate pace" : "Slow pace";
+    const cardioA = awayProfile.decisionPct > 40 ? "proven" : awayProfile.decisionPct < 15 ? "suspect" : "average";
+    const cardioH = homeProfile.decisionPct > 40 ? "proven" : homeProfile.decisionPct < 15 ? "suspect" : "average";
+    const cardio = `${awayProfile.displayName} cardio is ${cardioA}, ${homeProfile.displayName} is ${cardioH}`;
+
     summaryLines = [
       `${weightClass}${scheduledRounds === 5 ? " · 5-round" : ""}`,
       stanceNote + (reachNote ? ` · ${reachNote}` : ""),
       strNote,
       tdNote,
-      `Finish probability: ${(pFinish * 100).toFixed(0)}%`,
+      `${pace}. ${cardio}`,
     ];
   } else {
     // Record-only fallback
@@ -268,6 +277,8 @@ export function buildEnhancedCombatModel(
   const pRoundsOver = Math.min(0.90, Math.max(0.10, 1 - pFinish * (roundLine === 1.5 ? 0.62 : 0.78)));
 
   return {
+    pace: statsUsed ? (awayProfile!.strikeLPM + homeProfile!.strikeLPM > 9 ? "High pace" : "Moderate pace") : "Unknown pace",
+    cardio: "See summary",
     pHome,
     pAway: 1 - pHome,
     fairHomeML: american(pHome),

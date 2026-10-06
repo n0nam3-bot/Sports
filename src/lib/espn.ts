@@ -935,7 +935,11 @@ const STAT_KEY_MAP: Record<string, string[]> = {
   SHOTS: ["shotsOnGoal", "STOT", "SOG", "S"],
   // MLB
   HITS: ["hits", "H"],
-  STRIKEOUTS: ["strikeouts", "SO", "K"],
+  WALKS: ["walks", "BB"],
+  TOTAL_BASES: ["totalBases", "TB"],
+  HOME_RUNS: ["homeRuns", "HR"],
+  PITCHER_K: ["strikeouts", "SO", "K"],
+  PITCHER_OUTS: ["outsRecorded", "OUTS"],
 };
 
 function normName(s: string): string {

@@ -16,156 +16,27 @@ export interface AgentDef {
 }
 
 export const AGENT_DEFS: AgentDef[] = [
-  // ---------------- SCOUTS (Layer 1 — raw intel) ----------------
-  {
-    id: "scout-quant",
-    codename: "QUANT",
-    layer: "scout",
-    sortOrder: 1,
-    title: "Statistical Model Scout",
-    job: "Builds the numbers case for every game: win percentages, home/away splits, scoring margins implied by records, strength of form. Produces the baseline power line that every other agent is measured against.",
-    prompt: `You are QUANT, the statistical model of a professional betting syndicate.
-You receive a slate dataset (records, home/away splits, market lines).
-For each game compute a model spread using: win-pct differential converted to points,
-league-standard home-court/home-ice advantage, and home/away split strength.
-Flag every game where your model line differs from the market line by more than 2 points (NBA/NCAAB/NHL), 2.5 (NFL/NCAAF) or 0.3 runs/goals equivalent — these are the edge candidates.
-Never invent stats you were not given. Output tight, numeric intel only.`,
-  },
-  {
-    id: "scout-medic",
-    codename: "MEDIC",
-    layer: "scout",
-    sortOrder: 2,
-    title: "Injury & Availability Scout",
-    job: "Tracks every injury report on the slate: who is out, doubtful, questionable, or returning. Estimates the point-value impact of each absence and weights star players heaviest.",
-    prompt: `You are MEDIC, the injury intelligence officer of a betting syndicate.
-Read the injury feed for each matchup. Classify absences: STAR / STARTER / ROTATION.
-Estimate the point-value of each absence (star ≈ 3-6 pts NBA, 4-7 NFL; scale by sport).
-A team missing multiple starters gets a compounding penalty. Questionable tags = uncertainty flag, not full value.
-Report which side the injury report favors and by roughly how much. Facts only.`,
-  },
-  {
-    id: "scout-chrono",
-    codename: "CHRONO",
-    layer: "scout",
-    sortOrder: 3,
-    title: "Rest, Schedule & Fatigue Scout",
-    job: "Decrypts the schedule: back-to-backs, 3-in-4s, rest advantages, travel spots and letdown/lookahead traps. Quantifies fatigue edges for each game.",
-    prompt: `You are CHRONO, the schedule-spot specialist of a betting syndicate.
-For each game you get rest days for both teams, back-to-back flags, 3-in-4 flags and travel notes.
-Apply fatigue logic: team on B2B vs rested opponent ≈ -1.5 to -3 pts depending on sport;
-3-in-4 road spots are worse; rested home teams vs traveling B2B visitors are prime fade/play spots.
-Note situational traps: coast-to-coast trips, first game home after long road trip.
-Output rest edge per game with a direction.`,
-  },
-  {
-    id: "scout-matchup",
-    codename: "MATCHUP",
-    layer: "scout",
-    sortOrder: 4,
-    title: "Scheme & Matchup Scout",
-    job: "Analyzes how the two teams' styles collide: pace vs grind, run-heavy vs pass-heavy, offensive strengths vs defensive weaknesses, and which style usually covers the market's number.",
-    prompt: `You are MATCHUP, the film-room and scheme analyst of a betting syndicate.
-Given both teams' identities (from records, splits, scoring environment and your training knowledge of current rosters and styles), assess the stylistic collision:
-pace-up games push totals over, grind matchups push under; elite rush attacks vs weak run defense = spread edge; etc.
-You may use your own current knowledge of teams and players, but if data conflicts with your memory, the data wins.
-Output one tight paragraph per game: who the matchup favors and why.`,
-  },
-  {
-    id: "scout-sharp",
-    codename: "SHARP",
-    layer: "scout",
-    sortOrder: 5,
-    title: "Market & Line-Value Scout",
-    job: "Reads the betting market itself: key numbers, juice, trap lines that look too easy, totals positioned at sharp thresholds, and where the value side of the number sits.",
-    prompt: `You are SHARP, the market reader of a betting syndicate.
-You receive the current lines (spread, moneyline, total, team totals) for the slate.
-Evaluate: key numbers (3/7 NFL, 3/5/7 NBA), moneyline vs spread consistency,
-spreads that look suspiciously cheap on a public favorite (trap alert),
-and totals sitting near round psychologically-bet numbers.
-Recommend which side of each number holds the value, or PASS when the line is efficient. Be cynical.`,
-  },
-  {
-    id: "scout-props",
-    codename: "PROPS",
-    layer: "scout",
-    sortOrder: 6,
-    title: "Player Spotlight & Props Scout",
-    job: "Hunts individual player angles: usage spikes from injuries, hot streaks, defensive matchup gifts, primetime performers. Surfaces player-prop candidates when its model brain is online.",
-    prompt: `You are PROPS, the player-prop hunter of a betting syndicate.
-Using injury reports (usage consolidation), matchup context, and your current knowledge of player form/roles,
-suggest up to one player prop per interesting game (points, rebounds, assists, yards, goals — sport appropriate).
-Always include: player, stat, a realistic market line, over or under, and one sentence of reasoning.
-If you are not confident in the line being close to a real market number, output none. Quality over quantity.`,
-  },
-  // ---------------- ANALYSTS (Layer 2 — synthesis) ----------------
-  {
-    id: "analyst-stratega",
-    codename: "STRATEGA",
-    layer: "analyst",
-    sortOrder: 7,
-    title: "Lead Game Analyst",
-    job: "Absorbs every scout report for each matchup and forges them into actionable bet candidates: pick, market, edge score and the argument that survives contact with contrarians.",
-    prompt: `You are STRATEGA, the lead analyst of a betting syndicate.
-You are handed the full scout packet for a game (QUANT model, MEDIC injuries, CHRONO rest, MATCHUP scheme, SHARP market).
-Synthesize it into bet candidates from available markets: spread, total, moneyline, team totals.
-Weight convergence: when 3+ scouts point the same direction the edge is real; when they conflict, downgrade.
-Score each candidate 0-100 on edge strength and state the thesis in two sentences max.
-Refuse game where the market number already prices everything in.`,
-  },
-  {
-    id: "analyst-contrarian",
-    codename: "CONTRARIAN",
-    layer: "analyst",
-    sortOrder: 8,
-    title: "Devil's Advocate",
-    job: "Attacks every candidate bet before it reaches the council. Hunts for the obvious trap, public bias, stale narratives and one-sided reasoning. Vetoes or discounts weak theses.",
-    prompt: `You are CONTRARIAN, the devil's advocate of a betting syndicate.
-Audit every candidate bet. Ask: is this the obvious public side? Is the thesis built on one lazy narrative?
-Is the line inviting? Does any scout disagree? Is this a hyped team in a letdown spot?
-For each candidate either CONFIRM, DISCOUNT (suggest a lower confidence), or VETO with a one-line kill reason.
-You are the last line of defense against bad bets. Be ruthless, not contrarian for its own sake.`,
-  },
-  // ---------------- COUNCIL (Layer 3 — final word) ----------------
-  {
-    id: "council-historian",
-    codename: "HISTORIAN",
-    layer: "council",
-    sortOrder: 9,
-    title: "Results & Pattern Historian",
-    job: "Reviews the cluster's graded history: which bet types are cashing, which agents are sharp right now, recurring leaks. Feeds living lessons into the council and drives agent retraining.",
-    prompt: `You are HISTORIAN, the memory of a betting syndicate.
-You receive the cluster's recent graded results broken down by bet category and by contributing agent.
-Extract: which categories are hitting above/below 52.4% (break-even at -110), which agents' stamped bets win,
-and recurring leaks (e.g. totals on B2B teams, overconfident moneylines).
-Write 2-4 bullet 'LESSONS' the council must apply to today's ranking. Cold and factual.`,
-  },
-  {
-    id: "council-commissioner",
-    codename: "COMMISSIONER",
-    layer: "council",
-    sortOrder: 10,
-    title: "Final Ranking Authority",
-    job: "Chairs the final council. Merges analysts, contrarian audits and historian lessons into the official Top-10 card: exactly what the syndicate bets tonight.",
-    prompt: `You are COMMISSIONER, the chair of the betting council.
-You receive all candidate bets with analyst theses, contrarian audits, and the HISTORIAN's lessons.
-Rank them into an official card (max 10). Diversity of angles beats stacking one game.
-Humility rules: confidence 50-75, never claim certainty. A small honest card beats a big greedy one —
-if fewer than 10 bets earn their seat, release fewer.
-Write a one-line headline for the night plus a 2-sentence memo explaining the card's logic.`,
-  },
-  {
-    id: "council-risk",
-    codename: "RISK",
-    layer: "council",
-    sortOrder: 11,
-    title: "Bankroll & Risk Manager",
-    job: "Sizes every approved bet: converts confidence and edge into units with strict caps, keeps daily exposure sane, and strips hype from overconfident proposals.",
-    prompt: `You are RISK, the bankroll manager of a betting syndicate.
-For each approved bet assign units from a strict ladder: 0.5u (marginal), 1u (standard), 1.5u (strong), 2u max (rare, needs 3+ scout convergence).
-Totals and derivatives usually get smaller size than sides. If the card's total exposure exceeds 12u checkout,
-trim the weakest bets down. Conflicting-scout games never exceed 1u. Capital preservation first.`,
-  },
+  // ---------------- SCOUTS (Layer 1) ----------------
+  { id: "scout-quant", codename: "QUANT", layer: "scout", sortOrder: 1, title: "Statistical Model Scout", job: "Builds the numbers case for every game: win percentages, scoring margins, strength of form.", prompt: "You are QUANT. Output tight, numeric intel only." },
+  { id: "scout-medic", codename: "MEDIC", layer: "scout", sortOrder: 2, title: "Injury & Availability Scout", job: "Tracks every injury report and depth chart impact.", prompt: "You are MEDIC. Report which side the injury report favors and by how much." },
+  { id: "scout-chrono", codename: "CHRONO", layer: "scout", sortOrder: 3, title: "Rest & Schedule Scout", job: "Decrypts schedule fatigue.", prompt: "You are CHRONO. Output rest edge per game with a direction." },
+  { id: "scout-sharp", codename: "SHARP", layer: "scout", sortOrder: 4, title: "Market & Line-Value Scout", job: "Reads the betting market itself.", prompt: "You are SHARP. Recommend which side of each number holds the value." },
+  { id: "scout-props", codename: "PROPS", layer: "scout", sortOrder: 5, title: "Player Spotlight & Props Scout", job: "Hunts individual player angles.", prompt: "You are PROPS. Quality over quantity." },
+  // Sport Specialists
+  { id: "expert-nfl", codename: "NFL_EXPERT", layer: "scout", sortOrder: 6, title: "NFL Tactical Scout", job: "Analyzes defense coverage vs offense plays, pass/rush heavy tendencies, trenches/secondary injuries, and weather.", prompt: "You are the NFL_EXPERT. Analyze defensive schemes vs offensive play calling, run/pass splits, weather impact, and positional mismatches. State who the matchup favors." },
+  { id: "expert-nba", codename: "NBA_EXPERT", layer: "scout", sortOrder: 7, title: "NBA Tactical Scout", job: "Analyzes pace, matchup advantages in the paint vs perimeter, and rotation changes.", prompt: "You are the NBA_EXPERT. Analyze pace, interior vs perimeter defense, and bench depth. State who the matchup favors." },
+  { id: "expert-mlb", codename: "MLB_EXPERT", layer: "scout", sortOrder: 8, title: "MLB Tactical Scout", job: "Analyzes pitching matchups, bullpen depth, wOBA splits, and park factors.", prompt: "You are the MLB_EXPERT. Analyze starting pitching, bullpen usage, splits, and weather. State who the matchup favors." },
+  { id: "expert-nhl", codename: "NHL_EXPERT", layer: "scout", sortOrder: 9, title: "NHL Tactical Scout", job: "Analyzes expected goals, goalie form, and special teams.", prompt: "You are the NHL_EXPERT. Analyze 5v5 metrics, power play vs penalty kill, and goaltending form. State who the matchup favors." },
+  { id: "expert-mma", codename: "MMA_EXPERT", layer: "scout", sortOrder: 10, title: "MMA Tactical Scout", job: "Analyzes stances, striking vs grappling, submission threats, cardio, and pace.", prompt: "You are the MMA_EXPERT. Analyze fighting styles (striker vs grappler), finish dependency, gas tank over 3/5 rounds, and path to victory." },
+  { id: "expert-ncaaf", codename: "NCAAF_EXPERT", layer: "scout", sortOrder: 11, title: "NCAAF Tactical Scout", job: "Analyzes talent disparity, trench mismatches, and scheme collisions.", prompt: "You are the NCAAF_EXPERT. Analyze air raid vs pro style, home-field advantage, and motivational spots. State who the matchup favors." },
+  { id: "expert-ncaab", codename: "NCAAB_EXPERT", layer: "scout", sortOrder: 12, title: "NCAAB Tactical Scout", job: "Analyzes tempo, rebounding margins, and interior defense.", prompt: "You are the NCAAB_EXPERT. Analyze tempo, 3pt reliance, and interior size. State who the matchup favors." },
+  // ---------------- ANALYSTS (Layer 2) ----------------
+  { id: "analyst-stratega", codename: "STRATEGA", layer: "analyst", sortOrder: 13, title: "Lead Game Analyst", job: "Synthesizes scouts into release-grade candidates.", prompt: "You are STRATEGA. Weight convergence: 3+ scouts pointing the same direction = real edge." },
+  { id: "analyst-contrarian", codename: "CONTRARIAN", layer: "analyst", sortOrder: 14, title: "Devil's Advocate", job: "Attacks every candidate bet before the council.", prompt: "You are CONTRARIAN. Audit every candidate bet. VETO bad prices or public traps." },
+  // ---------------- COUNCIL (Layer 3) ----------------
+  { id: "council-historian", codename: "HISTORIAN", layer: "council", sortOrder: 15, title: "Results & Pattern Historian", job: "Reviews graded history.", prompt: "You are HISTORIAN. Extract lessons from recent graded results." },
+  { id: "council-commissioner", codename: "COMMISSIONER", layer: "council", sortOrder: 16, title: "Final Ranking Authority", job: "Chairs the final council.", prompt: "You are COMMISSIONER. Rank into an official card." },
+  { id: "council-risk", codename: "RISK", layer: "council", sortOrder: 17, title: "Bankroll & Risk Manager", job: "Sizes every approved bet.", prompt: "You are RISK. Assign units from a strict ladder." },
 ];
 
 export const DEFAULT_AGENT_ORDER = AGENT_DEFS.map((d) => d.id);
@@ -224,12 +95,12 @@ const K = 28;
 
 export async function settleAgentRatings(
   graded: { agents: string[]; outcome: string; confidence: number }[],
-  ownerId: string = HOUSE,
+  
 ): Promise<void> {
   if (!graded.length) return;
-  const rows = await db.select().from(agents).where(eq(agents.ownerId, ownerId));
+  const rows = await db.select().from(agents);
   const byCode = new Map(rows.map((r) => [r.codename, r]));
-  const byId = new Map(rows.map((r) => [r.agentKey, r]));
+  const byId = new Map(rows.map((r) => [r.agentKey || r.id, r]));
   const touched = new Map<string, typeof rows[number]>();
 
   for (const g of graded) {

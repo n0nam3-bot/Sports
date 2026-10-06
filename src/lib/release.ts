@@ -1,6 +1,6 @@
 export const RELEASE = {
-  version: "3.3.0",
-  name: "Combat Odds + Rerun Fix",
+  version: "4.0.0",
+  name: "Global Fleet & Tactical Experts",
   built: "2026-09-29",
   sports: ["NBA", "NFL", "NCAAF", "NCAAB", "MLB", "NHL", "UFC", "DWCS", "PFL"],
   features: {
@@ -18,6 +18,9 @@ export const RELEASE = {
     modelDropdowns: true,
     combatModelOdds: true,
     rerunShowsFullCard: true,
+    globalAgents: true,
+    sportTacticians: true,
+    adminForceImprove: true,
   },
   boxing: {
     enabled: false,

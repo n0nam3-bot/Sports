@@ -262,6 +262,8 @@ function combatCandidates(g: GameInfo, nextId: () => number): Candidate[] {
   // separation in record strength earns a side.
   const statsLabel = (m as any).statsUsed ? "ESPN career stats" : "record-based model";
   const matchupSummary = (m as any).summary || `${c.weightClass} ${c.scheduledRounds}rd bout`;
+  const under15 = (m.pFinish * (c.scheduledRounds === 5 ? 0.4 : 0.6) * 100).toFixed(0);
+  const mmaExtra = `u1.5 rds prob: ${under15}%.`;
 
   if (pFav >= 0.53) {
     out.push({
@@ -272,7 +274,7 @@ function combatCandidates(g: GameInfo, nextId: () => number): Candidate[] {
       edge: (pFav - 0.5) * 100,
       confidence: Math.min(66, 52 + (pFav - 0.5) * 52 + ((m as any).statsUsed ? 3 : 0) + jitter(g.eventId + "fml")),
       signals: (m as any).statsUsed ? ["QUANT", "MATCHUP", "PROPS"] : ["QUANT", "MATCHUP"],
-      thesis: `${fav.name} (${fav.record}) vs ${dog.name} (${dog.record}). ${matchupSummary}. ${statsLabel} makes ${fav.name} a ${(pFav * 100).toFixed(0)}% favourite — fair price ${priceTag}. Shop your book: this is only valuable if they post better than ${priceTag}.`,
+      thesis: `${fav.name} (${fav.record}) vs ${dog.name} (${dog.record}). ${matchupSummary}. ${mmaExtra} ${statsLabel} makes ${fav.name} a ${(pFav * 100).toFixed(0)}% favourite. `,
       grade: { side: favHome ? "home" : "away", line: null },
     });
   }
@@ -291,7 +293,7 @@ function combatCandidates(g: GameInfo, nextId: () => number): Candidate[] {
       edge: Math.abs(m.pFinish - 0.5) * 100,
       confidence: Math.min(62, 52 + Math.abs(m.pFinish - 0.5) * 42 + ((m as any).statsUsed ? 2 : 0) + jitter(g.eventId + "fm")),
       signals: (m as any).statsUsed ? ["MATCHUP", "PROPS", "QUANT"] : ["MATCHUP", "PROPS"],
-      thesis: `${matchupSummary}. ${statsLabel} models ${(m.pFinish * 100).toFixed(0)}% stoppage probability — ${finish ? "finishing tendencies and striking output favour an early end" : "both fighters' decision percentages and cardio point to the scorecards"}. Fair price ${price > 0 ? "+" : ""}${price}.`,
+      thesis: `${matchupSummary}. ${mmaExtra} ${statsLabel} models ${(m.pFinish * 100).toFixed(0)}% stoppage probability — ${finish ? "finishing tendencies and striking output favour an early end" : "both fighters' decision percentages and cardio point to the scorecards"}. `,
       grade: { side: finish ? "under" : "over", line: c.scheduledRounds, segment: "FIGHT" },
     });
   }
@@ -790,8 +792,8 @@ export async function runPipeline(
 ): Promise<void> {
   const [run] = await db.select().from(runs).where(eq(runs.id, runId));
   if (!run) return;
-  await ensureAgentsSeeded(ownerId);
-  const roster = await db.select().from(agents).where(eq(agents.ownerId, ownerId));
+  await ensureAgentsSeeded();
+  const roster = await db.select().from(agents);
   const agent = (key: string) => roster.find((a) => a.codename === key || a.agentKey === key);
   const nowMode = targetFor("scout-quant", keys) ? "llm" : "heuristic";
 
@@ -876,11 +878,22 @@ export async function runPipeline(
 
     const slateText = pre.map(digest).join("\n\n");
 
-    for (const code of ["QUANT", "MEDIC", "CHRONO", "MATCHUP", "SHARP"] as const) {
-      const a = agent(code);
+    const sportsInSlate = [...new Set(pre.map((g) => g.sport))];
+    const sportExperts = sportsInSlate.map((s) => `EXPERT_${s.toUpperCase()}`);
+    const scoutCodes = ["QUANT", "MEDIC", "CHRONO", ...sportExperts, "SHARP"];
+
+    for (const code of scoutCodes) {
+      let a = agent(code);
+      if (!a && code.startsWith("EXPERT_")) {
+         const sportCode = code.split("_")[1].toLowerCase();
+         // map dwcs/pfl to mma expert
+         const eCode = ["dwcs", "pfl", "ufc"].includes(sportCode) ? "mma" : sportCode;
+         a = agent(`expert-${eCode}`) ?? agent(`expert-nfl`); // fallback just in case
+      }
       const target = a ? targetFor(a.id, keys) : null;
       const injGames = pre.filter((g) => g.injuries.length > 0);
       const fatigueGames = pre.filter((g) => g.rest && (g.rest.homeB2B || g.rest.awayB2B || g.rest.home3in4 || g.rest.away3in4));
+      
       const scope: Record<string, string> = {
         QUANT: `power lines built for ${pre.length} games — ${allCandidates.filter((c) => c.category === "spread" || c.category === "moneyline").length} model-vs-market edges flagged.${allCandidates.length > 0 ? ` strongest edge: ${allCandidates[0].pick} (${allCandidates[0].edge.toFixed(1)} pts).` : ""}`,
         MEDIC: injGames.length
@@ -889,9 +902,11 @@ export async function runPipeline(
         CHRONO: fatigueGames.length
           ? `fatigue spots identified: ${fatigueGames.slice(0, 3).map((g) => { const r = g.rest!; return `${g.matchup} (${r.homeB2B ? g.home.abbr + " B2B" : r.awayB2B ? g.away.abbr + " B2B" : r.home3in4 ? g.home.abbr + " 3-in-4" : g.away.abbr + " 3-in-4"})`; }).join(", ")}${fatigueGames.length > 3 ? ` +${fatigueGames.length - 3} more` : ""}.`
           : `no significant rest or travel edges on this slate.`,
-        MATCHUP: `style analysis complete for ${pre.length} matchups — pace, scoring environment, and scheme collision factors priced.`,
+        EXPERT: `tactical analysis complete — sport-specific factors (schemes, weather, matchups) priced.`,
         SHARP: `${pre.filter((g) => g.odds).length}/${pre.length} games carry posted lines. Key number positions and juice asymmetries noted.`,
       };
+      
+      const scopeKey = code.startsWith("EXPERT_") ? "EXPERT" : code;
       let extra = "";
       if (target && a) {
         const intel = await llmJson<{ notes?: string }>(
@@ -905,7 +920,7 @@ export async function runPipeline(
       await trace(runId, {
         layer: "scout",
         agent: code,
-        message: `${scope[code]}${extra}`,
+        message: `${scope[scopeKey]}${extra}`,
         mood: "info",
       });
     }
@@ -968,7 +983,8 @@ export async function runPipeline(
     // ---------------- Layer 2: analysts ----------------
     allCandidates.sort((a, b) => b.confidence - a.confidence);
     const stratega = agent("analyst-stratega") ?? agent("STRATEGA");
-    const strategaTarget = stratega ? targetFor(stratega.id, keys) : null;
+    const strategaTarget = llmEnabled && stratega ? targetFor(stratega.id, keys, true) : null;
+    let strategaDetails = "no LLM used";
     const top = allCandidates.slice(0, 14);
     if (strategaTarget && stratega) {
       interface Verdict { id: number; confidence?: number; thesis?: string }
@@ -986,16 +1002,17 @@ export async function runPipeline(
         if (v.thesis && v.thesis.length > 20) c.thesis = v.thesis;
       }
       const survived = new Set((out?.verdicts ?? []).map((v) => v.id));
-      if (survived.size > 0) {
+      strategaDetails = out?.verdicts?.map((v: any) => `#${v.id} (conf ${v.confidence}): ${v.thesis}`).join(" | ") || "no detailed theses returned";
+                  if (survived.size > 0) {
         for (const c of allCandidates) {
           if (top.includes(c) && !survived.has(c.id)) c.confidence -= 12; // analyst passed
         }
       }
     }
-    await trace(runId, {
+        await trace(runId, {
       layer: "analyst",
       agent: "STRATEGA",
-      message: `forged ${allCandidates.length} raw signals — top ${top.length} theses graded for release, convergence-weighted (multi-scout agreement counts heaviest).`,
+      message: `forged ${allCandidates.length} raw signals — top ${top.length} theses graded for release. Details: ${strategaDetails}`,
       mood: "info",
     });
 
@@ -1022,7 +1039,8 @@ export async function runPipeline(
       }
     }
     const contrarian = agent("CONTRARIAN");
-    const contraTarget = contrarian ? targetFor(contrarian.id, keys) : null;
+    const contraTarget = llmEnabled && contrarian ? targetFor(contrarian.id, keys, true) : null;
+    let contraDetails = "no LLM used";
     if (contraTarget && contrarian && !vetoCount && allCandidates.length > 2) {
       interface Audit { id: number; verdict: "CONFIRM" | "DISCOUNT" | "VETO"; why?: string }
       const out = await llmJson<{ audits?: Audit[] }>(
@@ -1042,18 +1060,19 @@ export async function runPipeline(
           c.confidence = Math.max(45, c.confidence - 5);
         }
       }
+      contraDetails = out?.audits?.filter((a: any) => a.verdict !== "CONFIRM").map((a: any) => `#${a.id} ${a.verdict}: ${a.why}`).join(" | ") || "all confirmed";
     }
-    await trace(runId, {
+        await trace(runId, {
       layer: "analyst",
       agent: "CONTRARIAN",
-      message: `audit complete — ${vetoCount} candidate${vetoCount === 1 ? "" : "s"} vetoed (juice/trap/sub-threshold), ${allCandidates.filter((c) => c.discount && !c.vetoed).length} discounted, ${allCandidates.filter((c) => !c.vetoed).length} cleared for the council floor.`,
+      message: `audit complete — ${vetoCount} vetoed, ${allCandidates.filter((c) => c.discount && !c.vetoed).length} discounted, ${allCandidates.filter((c) => !c.vetoed).length} cleared. Notes: ${contraDetails}`,
       mood: vetoCount ? "warn" : "info",
     });
 
     const live = allCandidates.filter((c) => !c.vetoed).sort((a, b) => b.confidence - a.confidence);
 
     // ---------------- Layer 3: council ----------------
-    const lessons = await buildLessons(ownerId);
+    const lessons = await buildLessons();
     await trace(runId, {
       layer: "council",
       agent: "HISTORIAN",
@@ -1093,7 +1112,7 @@ export async function runPipeline(
       perGame.set(c.game.eventId, (perGame.get(c.game.eventId) ?? 0) + 1);
       perFamily.set(fam, (perFamily.get(fam) ?? 0) + 1);
       c.finalUnits = cost;
-      c.signals = [...new Set([...c.signals, "STRATEGA", "CONTRARIAN", "COMMISSIONER", "RISK", "HISTORIAN"])];
+      c.signals = [...new Set([...c.signals.map(s => s === "MATCHUP" ? "EXPERT" : s), "STRATEGA", "CONTRARIAN", "COMMISSIONER", "RISK", "HISTORIAN"])];
       card.push(c);
       exposure += cost;
       return cost;
@@ -1196,7 +1215,7 @@ function statLabel(stat: string): string {
   return map[stat] ?? stat.toLowerCase();
 }
 
-const SCOUT_CODES = new Set(["QUANT", "MEDIC", "CHRONO", "MATCHUP", "SHARP", "PROPS"]);
+const SCOUT_CODES = new Set(["QUANT", "MEDIC", "CHRONO", "EXPERT", "SHARP", "PROPS"]);
 
 /** Derivatives carry more variance than sides — RISK sizes them down. */
 const REDUCED_SIZE = new Set(["total", "team_total", "player_prop", "1h_total", "1h_spread", "f5_total"]);
@@ -1231,9 +1250,10 @@ async function finishRun(runId: number, ownerId: string, slateDate: string, deci
         id: predictions.id,
         runId: predictions.runId,
         outcome: predictions.outcome,
+        finalScore: predictions.finalScore,
       })
       .from(predictions)
-      .where(and(eq(predictions.ownerId, ownerId), eq(predictions.dedupeKey, key)))
+      .where(eq(predictions.dedupeKey, key))
       .limit(1);
 
     if (existing) {
@@ -1314,11 +1334,11 @@ function dedupeKeyFor(slateDate: string, c: Candidate): string {
   ].join("|");
 }
 
-async function buildLessons(ownerId: string = HOUSE): Promise<string[]> {
+async function buildLessons(): Promise<string[]> {
   const graded = await db
     .select()
     .from(predictions)
-    .where(and(eq(predictions.ownerId, ownerId), ne(predictions.outcome, "pending")))
+    .where(and( ne(predictions.outcome, "pending")))
     .orderBy(desc(predictions.id))
     .limit(150);
   const lessons: string[] = [];
@@ -1344,14 +1364,14 @@ async function buildLessons(ownerId: string = HOUSE): Promise<string[]> {
 // agents their rating adjustments (wins/losses ripple through the roster)
 // ---------------------------------------------------------------------------
 
-export async function gradePending(ownerId: string = HOUSE): Promise<{ graded: number; wins: number; losses: number; pushes: number }> {
+export async function gradePending(): Promise<{ graded: number; wins: number; losses: number; pushes: number }> {
   await ensureSchema();
   const pending = await db
     .select()
     .from(predictions)
     .where(
       and(
-        eq(predictions.ownerId, ownerId),
+        
         eq(predictions.outcome, "pending"),
         lt(predictions.startTime, new Date(Date.now() - 45 * 60_000)),
       ),
@@ -1486,6 +1506,6 @@ export async function gradePending(ownerId: string = HOUSE): Promise<{ graded: n
   }
 
   // settle agent ratings afterwards (drives retraining)
-  await settleAgentRatings(creditList, ownerId);
+  await settleAgentRatings(creditList);
   return { graded, wins, losses, pushes };
 }
