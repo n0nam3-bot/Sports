@@ -302,6 +302,18 @@ export default function KeysModal({
               {message}
             </div>
           )}
+          
+          <div className="border-t border-white/10 pt-4 mt-2">
+            <span className="font-mono text-[10px] font-bold uppercase tracking-[0.2em] text-[#5f7089]">
+              Admin Setup
+            </span>
+            <p className="mt-1 text-[11px] leading-snug text-[#5f7089]">
+              To edit agent prompts globally, copy this Device ID and set it as <code>ADMIN_OWNER_ID</code> in Vercel.
+            </p>
+            <div className="mt-2 text-[#39d5ff] font-mono text-[10px] select-all bg-white/[0.03] border border-white/10 p-2">
+               {typeof window !== "undefined" ? window.localStorage.getItem("neonslip.owner.v1") : ""}
+            </div>
+          </div>
         </div>
 
         {/* actions */}

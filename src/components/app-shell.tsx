@@ -49,6 +49,7 @@ export default function AppShell() {
   const [slateLoading, setSlateLoading] = useState(false);
   const [slateError, setSlateError] = useState<string | null>(null);
   const [agentsData, setAgentsData] = useState<AgentC[]>([]);
+  const [isAdmin, setIsAdmin] = useState(false);
   const [runsData, setRunsData] = useState<RunC[]>([]);
   const [activeId, setActiveId] = useState<number | null>(null);
   const [activeRun, setActiveRun] = useState<RunC | null>(null);
@@ -124,6 +125,7 @@ export default function AppShell() {
     const res = await vaultFetch("/api/agents", {}, vault, { llmMode });
     const data = await res.json();
     setAgentsData(data.agents ?? []);
+    setIsAdmin(!!data.isAdmin);
   }, [vault, llmMode]);
 
   useEffect(() => { void loadSlate(); }, [loadSlate]);
@@ -377,7 +379,7 @@ export default function AppShell() {
             card={cardForDate}
           />
         )}
-        {tab === "agents" && <AgentsView agents={agentsData} reload={loadAgents} />}
+        {tab === "agents" && <AgentsView agents={agentsData} reload={loadAgents} isAdmin={isAdmin} />}
         {tab === "ledger" && <RunsView runs={runsData} grade={grade} />}
       </main>
 

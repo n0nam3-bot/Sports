@@ -69,7 +69,7 @@ export interface ImprovementC {
   at: string; reason: string; detail: string; ratingBefore: number; ratingAfter: number;
 }
 export interface AgentC {
-  id: string; codename: string; layer: string; sortOrder: number; title: string;
+  id: string; agentKey?: string; codename: string; layer: string; sortOrder: number; title: string;
   job: string; prompt: string; model: string; rating: number;
   wins: number; losses: number; pushes: number;
   improvements: ImprovementC[]; updatedAt: string;

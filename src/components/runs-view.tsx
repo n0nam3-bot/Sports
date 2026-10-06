@@ -82,8 +82,7 @@ export default function RunsView({ runs, grade }: { runs: RunC[]; grade: () => P
           <Panel className="flex w-full items-center gap-3 px-4 py-3">
             <Vault className="h-5 w-5 text-[#9d7bff]" />
             <p className="font-mono text-[9.5px] uppercase leading-relaxed tracking-[0.14em] text-[#5f7089]">
-              this ledger is private to your device — your record, your agents, your prompts. duplicate picks are
-              detected and graded once, so re-running a slate never inflates your win rate.
+              this is the global prediction ledger. all runs from all users are shown here. duplicates are automatically detected and graded once. official runs are highlighted.
             </p>
           </Panel>
         </div>
@@ -111,6 +110,8 @@ export default function RunsView({ runs, grade }: { runs: RunC[]; grade: () => P
                 className="flex w-full flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3.5 text-left transition hover:bg-white/[0.025]"
               >
                 <span className="font-mono text-[11px] font-bold text-[#3d4c63]">#{r.id}</span>
+                {r.isViewerRun && <Chip tone="magenta" className="ml-2">Official</Chip>}
+                {!r.isViewerRun && <Chip tone="slate" className="ml-2">Community</Chip>}
                 <span className="font-display text-[15px] font-bold text-[#e8f1fb]">{r.slateDate}</span>
                 <span className="flex gap-1">
                   {r.sports.map((s) => (

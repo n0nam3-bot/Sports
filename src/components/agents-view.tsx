@@ -8,8 +8,16 @@ import {
 } from "lucide-react";
 import type { AgentC } from "./types";
 import { Chip, LadderBar, Panel, cx } from "./ui";
+import { vaultFetch } from "./keys";
 
 const ICONS: Record<string, typeof Brain> = {
+  "expert-nfl": Swords,
+  "expert-nba": Swords,
+  "expert-mlb": Swords,
+  "expert-nhl": Swords,
+  "expert-mma": Swords,
+  "expert-ncaaf": Swords,
+  "expert-ncaab": Swords,
   "scout-quant": Sigma,
   "scout-medic": Stethoscope,
   "scout-chrono": Hourglass,
@@ -50,10 +58,14 @@ const LAYER_META: Record<string, { title: string; tone: string; blurb: string }>
   },
 };
 
-export default function AgentsView({ agents, reload }: { agents: AgentC[]; reload: () => void }) {
+export default function AgentsView({ agents, reload, isAdmin }: { agents: AgentC[]; reload: () => void; isAdmin?: boolean }) {
   const layers = ["scout", "analyst", "council"] as const;
   const totalW = agents.reduce((s, a) => s + a.wins, 0);
   const totalL = agents.reduce((s, a) => s + a.losses, 0);
+  const totalP = agents.reduce((s, a) => s + a.pushes, 0);
+  const totalDecisive = totalW + totalL;
+  const globalWinrate = totalDecisive > 0 ? (totalW / totalDecisive) * 100 : 0;
+  const totalPredictions = totalW + totalL + totalP;
   const avgRating = agents.length ? agents.reduce((s, a) => s + a.rating, 0) / agents.length : 1500;
 
   return (
@@ -65,6 +77,7 @@ export default function AgentsView({ agents, reload }: { agents: AgentC[]; reloa
         <Chip tone="violet">{agents.length} agents</Chip>
         <Chip tone={avgRating >= 1500 ? "green" : "amber"}>fleet rating {avgRating.toFixed(0)}</Chip>
         <Chip tone="slate">{totalW}W – {totalL}L collective</Chip>
+        <Chip tone="cyan">Global: {globalWinrate.toFixed(1)}% WR ({totalPredictions} picks)</Chip>
         <span className="ml-auto hidden font-mono text-[10px] uppercase tracking-[0.18em] text-[#3d4c63] md:block">
           ratings rise &amp; fall on graded slips · losers rewrite their own playbooks
         </span>
@@ -86,7 +99,7 @@ export default function AgentsView({ agents, reload }: { agents: AgentC[]; reloa
             <div className={cx("grid gap-4",
               layer === "scout" ? "md:grid-cols-2 xl:grid-cols-3" : layer === "analyst" ? "md:grid-cols-2" : "md:grid-cols-3")}>
               {list.map((a) => (
-                <AgentCard key={a.id} agent={a} reload={reload} />
+                <AgentCard key={a.id} agent={a} reload={reload} isAdmin={isAdmin} />
               ))}
             </div>
           </section>
@@ -96,7 +109,7 @@ export default function AgentsView({ agents, reload }: { agents: AgentC[]; reloa
   );
 }
 
-function AgentCard({ agent, reload }: { agent: AgentC; reload: () => void }) {
+function AgentCard({ agent, reload, isAdmin }: { agent: AgentC; reload: () => void; isAdmin?: boolean }) {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(agent.prompt);
@@ -109,10 +122,10 @@ function AgentCard({ agent, reload }: { agent: AgentC; reload: () => void }) {
 
   async function save() {
     setSaving(true);
-    await fetch("/api/agents", {
+    await vaultFetch("/api/agents", {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ id: agent.id, prompt: draft }),
+      body: JSON.stringify({ id: agent.agentKey || agent.id, prompt: draft }),
     });
     setSaving(false);
     setEditing(false);
@@ -195,9 +208,15 @@ function AgentCard({ agent, reload }: { agent: AgentC; reload: () => void }) {
                 <pre className="max-h-56 overflow-y-auto whitespace-pre-wrap border border-white/8 bg-[#05080f] p-3 font-mono text-[10.5px] leading-relaxed text-[#8fa3bd]">
                   {agent.prompt}
                 </pre>
-                <button onClick={() => setEditing(true)} className="clip-tag flex items-center gap-1.5 border border-[#9d7bff]/35 bg-[#9d7bff]/10 px-3 py-1.5 font-mono text-[10px] font-bold uppercase tracking-[0.16em] text-[#9d7bff] hover:brightness-125">
+                {isAdmin && <button onClick={() => setEditing(true)} className="clip-tag flex items-center gap-1.5 border border-[#9d7bff]/35 bg-[#9d7bff]/10 px-3 py-1.5 font-mono text-[10px] font-bold uppercase tracking-[0.16em] text-[#9d7bff] hover:brightness-125">
                   <Wrench className="h-3 w-3" /> hand-tune prompt
-                </button>
+                </button>}
+                {isAdmin && <button onClick={async () => {
+                  await vaultFetch("/api/agents", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: agent.agentKey || agent.id }) });
+                  reload();
+                }} className="clip-tag flex items-center gap-1.5 border border-[#ff3d81]/35 bg-[#ff3d81]/10 px-3 py-1.5 font-mono text-[10px] font-bold uppercase tracking-[0.16em] text-[#ff3d81] hover:brightness-125 ml-2">
+                  <Wrench className="h-3 w-3" /> force improve
+                </button>}
               </>
             )}
           </div>
