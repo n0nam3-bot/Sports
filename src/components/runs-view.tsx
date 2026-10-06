@@ -1,8 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
-  ChevronDown, CircleCheck, Globe, Lock, RefreshCw, ScrollText, Star, Target, TrendingUp, Vault,
+  ChevronDown, CircleCheck, Filter, Globe, Lock, RefreshCw, ScrollText,
+  Star, Target, TrendingUp, Vault,
 } from "lucide-react";
 import type { PredC, RunC } from "./types";
 import { CategoryChip, Chip, OutcomeChip, Panel, cx } from "./ui";
@@ -16,17 +17,23 @@ function profit(p: PredC): number {
 
 function StatBlock({ label, value, tone }: { label: string; value: string; tone: string }) {
   return (
-    <Panel className="min-w-[130px] flex-1 px-4 py-3">
-      <div className="font-mono text-[9px] uppercase tracking-[0.22em] text-[#5f7089]">{label}</div>
-      <div className={cx("mt-0.5 font-mono text-[24px] font-bold", tone)}>{value}</div>
+    <Panel className="min-w-[100px] flex-1 px-3 py-2.5">
+      <div className="font-mono text-[8px] uppercase tracking-[0.22em] text-[#5f7089]">{label}</div>
+      <div className={cx("mt-0.5 font-mono text-[20px] font-bold", tone)}>{value}</div>
     </Panel>
   );
 }
+
+type ViewMode = "all" | "official" | "community";
+
+const ALL_SPORT_FILTERS = ["nfl", "nba", "mlb", "nhl", "ncaaf", "ncaab", "ufc", "dwcs", "pfl"] as const;
 
 export default function RunsView({ runs, grade }: { runs: RunC[]; grade: () => Promise<void> | void }) {
   const [openId, setOpenId] = useState<number | null>(runs[0]?.id ?? null);
   const [syncing, setSyncing] = useState(false);
   const [publishing, setPublishing] = useState<number | null>(null);
+  const [viewMode, setViewMode] = useState<ViewMode>("all");
+  const [sportFilter, setSportFilter] = useState<string | null>(null);
 
   async function togglePublic(runId: number, currentlyPublic: boolean) {
     setPublishing(runId);
@@ -41,103 +48,198 @@ export default function RunsView({ runs, grade }: { runs: RunC[]; grade: () => P
     }
   }
 
-  const allPreds = runs.flatMap((r) => r.predictions);
-  const graded = allPreds.filter((p) => p.outcome !== "pending");
-  const wins = graded.filter((p) => p.outcome === "win").length;
-  const losses = graded.filter((p) => p.outcome === "loss").length;
-  const decisive = wins + losses;
-  const strike = decisive ? (wins / decisive) * 100 : null;
-  const pnl = allPreds.reduce((s, p) => s + profit(p), 0);
-  const pending = allPreds.length - graded.length;
+  // ---- filtering ----
+  const filtered = useMemo(() => {
+    let list = runs;
+    if (viewMode === "official") list = list.filter((r) => r.isViewerRun);
+    if (viewMode === "community") list = list.filter((r) => !r.isViewerRun);
+    if (sportFilter) list = list.filter((r) => r.sports.includes(sportFilter));
+    return list;
+  }, [runs, viewMode, sportFilter]);
 
-  async function sync() {
-    setSyncing(true);
-    await grade();
-    setSyncing(false);
+  // ---- stats computation ----
+  function computeStats(runList: RunC[]) {
+    const preds = runList.flatMap((r) => r.predictions).filter((p) => !p.isDuplicate);
+    const graded = preds.filter((p) => p.outcome !== "pending");
+    const w = graded.filter((p) => p.outcome === "win").length;
+    const l = graded.filter((p) => p.outcome === "loss").length;
+    const d = w + l;
+    return {
+      wins: w,
+      losses: l,
+      strike: d ? (w / d) * 100 : null,
+      pnl: preds.reduce((s, p) => s + profit(p), 0),
+      pending: preds.length - graded.length,
+      total: preds.length,
+    };
   }
+
+  const officialStats = useMemo(() => computeStats(runs.filter((r) => r.isViewerRun)), [runs]);
+  const communityStats = useMemo(() => computeStats(runs.filter((r) => !r.isViewerRun)), [runs]);
+  const filteredStats = useMemo(() => computeStats(filtered), [filtered]);
+
+  // ---- admin dedupe keys for star matching ----
+  const adminDedupeKeys = useMemo(() => {
+    const keys = new Set<string>();
+    runs.filter((r) => r.isViewerRun).forEach((r) =>
+      r.predictions.forEach((p) => {
+        if (p.dedupeKey) keys.add(p.dedupeKey);
+      }),
+    );
+    return keys;
+  }, [runs]);
+
+  // sort: official on top, community below
+  const sorted = useMemo(() => {
+    return [...filtered].sort((a, b) => {
+      if (a.isViewerRun && !b.isViewerRun) return -1;
+      if (!a.isViewerRun && b.isViewerRun) return 1;
+      return b.id - a.id;
+    });
+  }, [filtered]);
+
+  // ---- sports that appear in runs ----
+  const activeSports = useMemo(() => {
+    const set = new Set<string>();
+    runs.forEach((r) => r.sports.forEach((s) => set.add(s)));
+    return ALL_SPORT_FILTERS.filter((s) => set.has(s));
+  }, [runs]);
+
+  async function sync() { setSyncing(true); await grade(); setSyncing(false); }
+
+  const st = filteredStats;
 
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center gap-3">
         <ScrollText className="h-6 w-6 text-[#ffb020]" />
-        <h2 className="font-display text-2xl font-bold uppercase tracking-tight title-stroke">Prediction Ledger</h2>
-        <Chip tone="amber">{runs.length} runs archived</Chip>
+        <h2 className="font-display text-2xl font-bold uppercase tracking-tight title-stroke">
+          Prediction Ledger
+        </h2>
+        <Chip tone="amber">{filtered.length} runs</Chip>
         <button
           onClick={sync}
           disabled={syncing}
           className="clip-tag ml-auto flex items-center gap-2 border border-[#37ff8b]/40 bg-[#37ff8b]/10 px-4 py-2 font-mono text-[11px] font-bold uppercase tracking-[0.18em] text-[#37ff8b] transition hover:brightness-125 disabled:opacity-40"
         >
           <RefreshCw className={cx("h-3.5 w-3.5", syncing && "animate-spin")} />
-          {syncing ? "settling…" : "sync final scores & grade"}
+          {syncing ? "settling…" : "sync & grade"}
         </button>
       </div>
 
-      {/* scoreboard strip */}
-      <div className="flex flex-wrap gap-3">
-        <StatBlock label="graded record" value={`${wins}–${losses}`} tone="text-[#e8f1fb]" />
-        <StatBlock label="strike rate" value={strike != null ? `${strike.toFixed(1)}%` : "—"} tone={strike != null && strike >= 52.4 ? "text-[#37ff8b]" : "text-[#ffb020]"} />
-        <StatBlock label="units p/l" value={`${pnl >= 0 ? "+" : ""}${pnl.toFixed(1)}u`} tone={pnl >= 0 ? "text-[#37ff8b]" : "text-[#ff4757]"} />
-        <StatBlock label="pending" value={String(pending)} tone="text-[#ffb020]" />
-        <div className="hidden min-w-[220px] flex-1 items-center gap-3 md:flex">
-          <Panel className="flex w-full items-center gap-3 px-4 py-3">
-            <Vault className="h-5 w-5 text-[#9d7bff]" />
-            <p className="font-mono text-[9.5px] uppercase leading-relaxed tracking-[0.14em] text-[#5f7089]">
-              this is the global prediction ledger. all runs from all users are shown here. duplicates are automatically detected and graded once. official runs are highlighted.
-            </p>
-          </Panel>
-        </div>
+      {/* ============ View Mode Toggle ============ */}
+      <div className="flex flex-wrap items-center gap-2">
+        {(["all", "official", "community"] as const).map((mode) => (
+          <button
+            key={mode}
+            onClick={() => setViewMode(mode)}
+            className={cx(
+              "clip-tag border px-3 py-2 font-mono text-[10px] font-bold uppercase tracking-[0.14em] transition-all",
+              viewMode === mode
+                ? mode === "official"
+                  ? "border-[#ff3d81]/45 bg-[#ff3d81]/14 text-[#ff3d81]"
+                  : mode === "community"
+                    ? "border-[#5f7089]/45 bg-[#5f7089]/14 text-[#8fa3bd]"
+                    : "border-[#37ff8b]/45 bg-[#37ff8b]/14 text-[#37ff8b]"
+                : "border-white/10 bg-white/[0.03] text-[#5f7089] hover:border-white/25",
+            )}
+          >
+            {mode === "all" ? "All Runs" : mode === "official" ? "Official Only" : "Community Only"}
+          </button>
+        ))}
+
+        <span className="mx-1 text-[#3d4c63]">|</span>
+
+        <Filter className="h-3.5 w-3.5 text-[#5f7089]" />
+        <button
+          onClick={() => setSportFilter(null)}
+          className={cx(
+            "clip-tag border px-2 py-1.5 font-mono text-[9px] font-bold uppercase tracking-[0.12em] transition-all",
+            !sportFilter
+              ? "border-[#39d5ff]/45 bg-[#39d5ff]/14 text-[#39d5ff]"
+              : "border-white/10 bg-white/[0.03] text-[#5f7089] hover:border-white/25",
+          )}
+        >
+          all sports
+        </button>
+        {activeSports.map((sp) => (
+          <button
+            key={sp}
+            onClick={() => setSportFilter(sportFilter === sp ? null : sp)}
+            className={cx(
+              "clip-tag border px-2 py-1.5 font-mono text-[9px] font-bold uppercase tracking-[0.12em] transition-all",
+              sportFilter === sp
+                ? "border-[#39d5ff]/45 bg-[#39d5ff]/14 text-[#39d5ff]"
+                : "border-white/10 bg-white/[0.03] text-[#5f7089] hover:border-white/25",
+            )}
+          >
+            {sp}
+          </button>
+        ))}
       </div>
 
-      {runs.length === 0 && (
+      {/* ============ Stats Strip ============ */}
+      <div className="flex flex-wrap gap-2">
+        <StatBlock
+          label={viewMode === "official" ? "official record" : viewMode === "community" ? "community record" : "overall record"}
+          value={`${st.wins}–${st.losses}`}
+          tone="text-[#e8f1fb]"
+        />
+        <StatBlock
+          label="win rate"
+          value={st.strike != null ? `${st.strike.toFixed(1)}%` : "—"}
+          tone={st.strike != null && st.strike >= 52.4 ? "text-[#37ff8b]" : "text-[#ffb020]"}
+        />
+        <StatBlock label="units p/l" value={`${st.pnl >= 0 ? "+" : ""}${st.pnl.toFixed(1)}u`} tone={st.pnl >= 0 ? "text-[#37ff8b]" : "text-[#ff4757]"} />
+        <StatBlock label="pending" value={String(st.pending)} tone="text-[#ffb020]" />
+        {viewMode === "all" && officialStats.total > 0 && communityStats.total > 0 && (
+          <>
+            <StatBlock label="official WR" value={officialStats.strike != null ? `${officialStats.strike.toFixed(1)}%` : "—"} tone={officialStats.strike != null && officialStats.strike >= 52.4 ? "text-[#ff3d81]" : "text-[#ffb020]"} />
+            <StatBlock label="community WR" value={communityStats.strike != null ? `${communityStats.strike.toFixed(1)}%` : "—"} tone="text-[#8fa3bd]" />
+          </>
+        )}
+      </div>
+
+      {filtered.length === 0 && (
         <Panel className="p-10 text-center font-mono text-[12px] uppercase tracking-[0.2em] text-[#5f7089]">
-          no runs yet — hit <span className="text-[#37ff8b]">run the cluster</span> in the war room
+          {viewMode === "official" ? "no official runs found" : viewMode === "community" ? "no community runs found" : "no runs yet — hit run the cluster in the war room"}
         </Panel>
       )}
 
-      {/* run list */}
+      {/* ============ Run List ============ */}
       <div className="space-y-3">
-        {runs.map((r) => {
+        {sorted.map((r) => {
           const open = openId === r.id;
+          const isAdmin = !!r.isViewerRun;
           const rp = r.predictions;
-          const rg = rp.filter((p) => p.outcome !== "pending");
-          const rw = rp.filter((p) => p.outcome === "win").length;
-          const rl = rp.filter((p) => p.outcome === "loss").length;
-          const rpnl = rp.reduce((s, p) => s + profit(p), 0);
+          const rg = rp.filter((p) => p.outcome !== "pending" && !p.isDuplicate);
+          const rw = rg.filter((p) => p.outcome === "win").length;
+          const rl = rg.filter((p) => p.outcome === "loss").length;
+          const rpnl = rp.filter((p) => !p.isDuplicate).reduce((s, p) => s + profit(p), 0);
           return (
-            <Panel key={r.id} className="overflow-hidden">
+            <Panel
+              key={r.id}
+              className={cx(
+                "overflow-hidden",
+                !isAdmin && "border-l-2 border-l-[#3d4c63]/50",
+              )}
+            >
               <button
                 onClick={() => setOpenId(open ? null : r.id)}
-                className="flex w-full flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3.5 text-left transition hover:bg-white/[0.025]"
+                className={cx(
+                  "flex w-full flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3.5 text-left transition",
+                  isAdmin ? "hover:bg-white/[0.025]" : "hover:bg-white/[0.015] opacity-85",
+                )}
               >
                 <span className="font-mono text-[11px] font-bold text-[#3d4c63]">#{r.id}</span>
-                {r.isViewerRun && <Chip tone="magenta" className="ml-2">Official</Chip>}
-                {!r.isViewerRun && <Chip tone="slate" className="ml-2">Community</Chip>}
-                <span className="font-display text-[15px] font-bold text-[#e8f1fb]">{r.slateDate}</span>
+                {isAdmin
+                  ? <Chip tone="magenta">Official</Chip>
+                  : <Chip tone="slate">Community</Chip>}
+                <span className={cx("font-display text-[15px] font-bold", isAdmin ? "text-[#e8f1fb]" : "text-[#8fa3bd]")}>{r.slateDate}</span>
                 <span className="flex gap-1">
                   {r.sports.map((s) => (
-                    <span key={s} className="clip-tag border border-[#39d5ff]/25 bg-[#39d5ff]/8 px-1.5 py-px font-mono text-[8.5px] font-bold uppercase tracking-[0.12em] text-[#39d5ff]">{s}</span>
+                    <span key={s} className={cx("clip-tag border px-1.5 py-px font-mono text-[8.5px] font-bold uppercase tracking-[0.12em]", isAdmin ? "border-[#39d5ff]/25 bg-[#39d5ff]/8 text-[#39d5ff]" : "border-white/10 bg-white/[0.04] text-[#5f7089]")}>{s}</span>
                   ))}
-                </span>
-                <Chip tone={r.mode === "llm" ? "green" : "cyan"}>{r.mode === "llm" ? "llm swarm" : "quant core"}</Chip>
-                <Chip tone={r.status === "completed" ? "green" : r.status === "running" ? "amber" : "red"}>{r.status}</Chip>
-                {r.status === "completed" && (
-                  <button
-                    onClick={(e) => { e.stopPropagation(); void togglePublic(r.id, !!r.isPublic); }}
-                    disabled={publishing === r.id}
-                    className={cx(
-                      "clip-tag flex items-center gap-1 border px-1.5 py-px font-mono text-[8.5px] font-bold uppercase tracking-[0.12em] transition-all",
-                      r.isPublic
-                        ? "border-[#37ff8b]/40 bg-[#37ff8b]/10 text-[#37ff8b]"
-                        : "border-white/15 bg-white/[0.04] text-[#5f7089] hover:border-[#37ff8b]/30 hover:text-[#37ff8b]",
-                    )}
-                    title={r.isPublic ? "public — click to make private" : "private — click to share publicly"}
-                  >
-                    {r.isPublic ? <Globe className="h-2.5 w-2.5" /> : <Lock className="h-2.5 w-2.5" />}
-                    {r.isPublic ? "public" : "private"}
-                  </button>
-                )}
-                <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-[#5f7089]">
-                  {r.gamesAnalyzed} analyzed · {r.gamesSkipped} skipped
                 </span>
                 {rp.length > 0 && (
                   <span className="font-mono text-[11px] font-bold">
@@ -149,19 +251,18 @@ export default function RunsView({ runs, grade }: { runs: RunC[]; grade: () => P
                         {rpnl >= 0 ? "+" : ""}{rpnl.toFixed(1)}u
                       </span>
                     )}
-                    {rp.length - rg.length > 0 && <span className="ml-2 text-[#ffb020]">{rp.length - rg.length} open</span>}
                   </span>
                 )}
                 <ChevronDown className={cx("ml-auto h-4 w-4 text-[#5f7089] transition-transform", open && "rotate-180")} />
               </button>
 
               {open && (
-                <div className="border-t border-white/6 px-4 py-4">
+                <div className={cx("border-t border-white/6 px-4 py-4", !isAdmin && "bg-white/[0.01]")}>
                   {r.council?.headline && (
                     <div className="mb-4 flex items-start gap-3 border-l-2 border-[#ff3d81]/50 pl-3">
                       <Target className="mt-0.5 h-4 w-4 shrink-0 text-[#ff3d81]" />
                       <div>
-                        <div className="font-display text-[14px] font-bold text-[#e8f1fb]">{r.council.headline}</div>
+                        <div className={cx("font-display text-[14px] font-bold", isAdmin ? "text-[#e8f1fb]" : "text-[#8fa3bd]")}>{r.council.headline}</div>
                         <div className="text-[12px] leading-relaxed text-[#8fa3bd]">{r.council.memo}</div>
                       </div>
                     </div>
@@ -184,40 +285,66 @@ export default function RunsView({ runs, grade }: { runs: RunC[]; grade: () => P
                           </tr>
                         </thead>
                         <tbody>
-                          {rp.map((p) => (
-                             <tr
-                               key={p.id}
-                               className={cx(
-                                 "border-t border-white/5",
-                                 p.isDuplicate ? "text-[#5f7089] opacity-65" : "text-[#b8c6da]",
-                               )}
-                             >
-                               <td className="py-2 pr-3 text-[#3d4c63]">
-                                 {p.isDuplicate && p.canonRunId
-                                   ? <span title={`same bet as run #${p.canonRunId} — not counted again`}><Star className="inline h-3 w-3 text-[#ffb020]" /></span>
-                                   : p.sortOrder + 1}
-                               </td>
-                               <td className="py-2 pr-3"><CategoryChip category={p.category} /></td>
-                               <td className="max-w-[260px] py-2 pr-3">
-                                 <span className={cx("font-sans text-[12px] font-semibold", p.isDuplicate ? "text-[#5f7089] line-through" : "text-[#e8f1fb]")}>{p.pick}</span>
-                                 {p.isDuplicate && p.canonRunId && (
-                                   <span className="ml-2 font-mono text-[8.5px] uppercase tracking-wider text-[#8fa3bd]">graded on #{p.canonRunId}</span>
-                                 )}
-                               </td>
-                               <td className="py-2 pr-3 text-[#8fa3bd]">{p.matchup}</td>
-                               <td className="py-2 pr-3 text-right text-[#ffb020]">{p.odds > 0 ? `+${p.odds}` : p.odds}</td>
-                               <td className="py-2 pr-3 text-right text-[#39d5ff]">{p.confidence.toFixed(0)}</td>
-                               <td className="py-2 pr-3 text-right">{p.units.toFixed(1)}u</td>
-                               <td className="py-2 pr-3 text-right"><OutcomeChip outcome={p.outcome} /></td>
-                               <td className="py-2 text-right text-[#5f7089]">{p.finalScore ?? "—"}</td>
-                             </tr>
-                           ))}
+                          {rp.map((p) => {
+                            const matchesAdmin = !isAdmin && p.dedupeKey && adminDedupeKeys.has(p.dedupeKey);
+                            return (
+                              <tr
+                                key={p.id}
+                                className={cx(
+                                  "border-t border-white/5",
+                                  p.isDuplicate ? "text-[#5f7089] opacity-50" :
+                                  !isAdmin ? "text-[#8fa3bd]" : "text-[#b8c6da]",
+                                )}
+                              >
+                                <td className="py-2 pr-3 text-[#3d4c63]">
+                                  {matchesAdmin ? (
+                                    <span title="matches an official prediction — graded there">
+                                      <Star className="inline h-3 w-3 text-[#ff3d81]" />
+                                    </span>
+                                  ) : p.isDuplicate && p.canonRunId ? (
+                                    <span title={`same as run #${p.canonRunId}`}>
+                                      <Star className="inline h-3 w-3 text-[#ffb020]" />
+                                    </span>
+                                  ) : (
+                                    p.sortOrder + 1
+                                  )}
+                                </td>
+                                <td className="py-2 pr-3"><CategoryChip category={p.category} /></td>
+                                <td className="max-w-[260px] py-2 pr-3">
+                                  <span className={cx(
+                                    "font-sans text-[12px] font-semibold",
+                                    p.isDuplicate ? "text-[#5f7089] line-through" :
+                                    matchesAdmin ? "text-[#ff3d81]" :
+                                    !isAdmin ? "text-[#8fa3bd]" : "text-[#e8f1fb]",
+                                  )}>
+                                    {p.pick}
+                                  </span>
+                                  {matchesAdmin && (
+                                    <span className="ml-2 font-mono text-[8px] uppercase tracking-wider text-[#ff3d81]">
+                                      ★ matches official
+                                    </span>
+                                  )}
+                                  {p.isDuplicate && p.canonRunId && (
+                                    <span className="ml-2 font-mono text-[8px] uppercase tracking-wider text-[#8fa3bd]">
+                                      graded on #{p.canonRunId}
+                                    </span>
+                                  )}
+                                </td>
+                                <td className={cx("py-2 pr-3", !isAdmin ? "text-[#5f7089]" : "text-[#8fa3bd]")}>{p.matchup}</td>
+                                <td className="py-2 pr-3 text-right text-[#ffb020]">{p.odds > 0 ? `+${p.odds}` : p.odds}</td>
+                                <td className="py-2 pr-3 text-right text-[#39d5ff]">{p.confidence.toFixed(0)}</td>
+                                <td className="py-2 pr-3 text-right">{p.units.toFixed(1)}u</td>
+                                <td className="py-2 pr-3 text-right"><OutcomeChip outcome={p.outcome} /></td>
+                                <td className="py-2 text-right text-[#5f7089]">{p.finalScore ?? "—"}</td>
+                              </tr>
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>
                   ) : (
                     <div className="font-mono text-[11px] uppercase tracking-[0.18em] text-[#5f7089]">
-                      {r.status === "running" ? "cluster still thinking — trace streaming in the war room" : "no bets released on this card"}
+                      {r.status === "running" ? "cluster still thinking" : "no bets released"}
                     </div>
                   )}
 
@@ -245,8 +372,8 @@ export default function RunsView({ runs, grade }: { runs: RunC[]; grade: () => P
       <Panel className="flex items-center gap-3 p-4">
         <TrendingUp className="h-4 w-4 shrink-0 text-[#37ff8b]" />
         <p className="font-mono text-[10px] uppercase leading-relaxed tracking-[0.14em] text-[#5f7089]">
-          grading triggers when games go final — hit sync after the last whistle. every settled slip updates
-          agent ratings in real time; check the roster to watch reputations burn or rise.
+          global prediction ledger · official runs (admin) appear on top in full color · community runs appear below in
+          gray · ★ magenta star = community pick matches an official pick · ★ amber star = duplicate pick graded elsewhere
         </p>
         <CircleCheck className="ml-auto h-4 w-4 shrink-0 text-[#3d4c63]" />
       </Panel>

@@ -51,6 +51,7 @@ export interface PredC {
   carried?: boolean;
   isDuplicate?: boolean;
   canonRunId?: number | null;
+  dedupeKey?: string;
 }
 export interface RunC {
   id: number; slateDate: string; sports: string[]; markets?: string[]; status: string; mode: string;
