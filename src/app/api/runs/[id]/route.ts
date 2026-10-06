@@ -17,7 +17,7 @@ export async function GET(
   const [run] = await db
     .select()
     .from(runs)
-    .where(and(eq(runs.id, runId), eq(runs.ownerId, owner)));
+    .where(eq(runs.id, runId));
   if (!run) return Response.json({ error: "not found" }, { status: 404 });
 
   const fresh = await db
@@ -33,7 +33,7 @@ export async function GET(
     ? await db
         .select()
         .from(predictions)
-        .where(and(eq(predictions.ownerId, owner), inArray(predictions.id, carriedIds)))
+        .where(inArray(predictions.id, carriedIds))
     : [];
 
   const card = [
