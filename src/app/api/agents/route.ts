@@ -12,14 +12,14 @@ export const maxDuration = 30;
 export async function GET(req: NextRequest) {
   const keys = keysFromRequest(req);
   const llmEnabled = llmEnabledFromRequest(req);
-  const list = await listAgents(ownerFromRequest(req));
+  const list = await listAgents();
   // Model assignment is computed live so visitor-supplied keys are reflected
   // immediately, without persisting anyone's credentials.
   const withLive = list.map((a) => ({
     ...a,
     model: targetFor(a.agentKey, keys, llmEnabled)?.label ?? "heuristic-core",
   }));
-  return Response.json({ agents: withLive });
+  return Response.json({ agents: withLive, isAdmin: isAdminRequest(req) });
 }
 
 // Operator override: hand-tune an agent's prompt or model label.
@@ -40,14 +40,48 @@ export async function PATCH(req: NextRequest) {
     );
   }
   const owner = ownerFromRequest(req);
-  await listAgents(owner);
+  await listAgents();
   const res = await db
     .update(agents)
     .set({ prompt: body.prompt.trim().slice(0, 6000), updatedAt: new Date() })
-    .where(and(eq(agents.ownerId, owner), eq(agents.agentKey, body.id)))
+    .where(eq(agents.agentKey, body.id))
     .returning({ id: agents.id });
   if (!res.length) {
     return Response.json({ error: "agent not found in your workspace" }, { status: 404 });
   }
+  return Response.json({ ok: true });
+}
+
+
+// Admin override: Force an agent to self-improve immediately
+export async function POST(req: NextRequest) {
+  if (!isAdminRequest(req)) {
+    return Response.json({ error: "Unauthorized" }, { status: 403 });
+  }
+  const body = await req.json().catch(() => null);
+  if (!body?.id) return Response.json({ error: "id required" }, { status: 400 });
+  
+  const owner = ownerFromRequest(req);
+  const [row] = await db.select().from(agents).where(and(eq(agents.ownerId, "house"), eq(agents.agentKey, body.id)));
+  if (!row) return Response.json({ error: "not found" }, { status: 404 });
+  
+  const imps = row.improvements ?? [];
+  const entry = {
+    at: new Date().toISOString(),
+    reason: "Operator Forced Rewrite",
+    detail: "Admin triggered a manual playbook rebuild.",
+    ratingBefore: row.rating,
+    ratingAfter: row.rating,
+  };
+  const newPrompt = `${row.prompt}\n\nSELF-CORRECTION LOG (${entry.at.slice(0, 10)}):\nAdmin triggered a manual playbook rebuild. Discard stale approaches.`;
+  
+  await db.update(agents)
+    .set({
+      prompt: newPrompt.slice(0, 6000),
+      improvements: [...imps, entry].slice(-12),
+      updatedAt: new Date(),
+    })
+    .where(and(eq(agents.ownerId, "house"), eq(agents.agentKey, body.id)));
+    
   return Response.json({ ok: true });
 }
