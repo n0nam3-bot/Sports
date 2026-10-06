@@ -1,11 +1,11 @@
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { predictions, runs } from "@/db/schema";
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { desc, inArray } from "drizzle-orm";
 import { runPipeline } from "@/lib/engine";
 import { ensureSchema } from "@/lib/schema";
 import { keysFromRequest, llmEnabledFromRequest } from "@/lib/llm";
-import { ownerFromRequest } from "@/lib/owner";
+import { ownerFromRequest, adminOwnerId } from "@/lib/owner";
 
 export const dynamic = "force-dynamic";
 // Serverless safety: background pipelines are killed on freeze, so on
@@ -14,13 +14,11 @@ export const maxDuration = 60;
 
 export async function GET(req: NextRequest) {
   await ensureSchema();
-  const owner = ownerFromRequest(req);
-  const list = await db
+    const list = await db
     .select()
     .from(runs)
-    .where(eq(runs.ownerId, owner))
     .orderBy(desc(runs.id))
-    .limit(40);
+    .limit(50);
   const ids = list.map((r) => r.id);
   const preds = ids.length
     ? await db.select().from(predictions).where(inArray(predictions.runId, ids))
@@ -40,7 +38,7 @@ export async function GET(req: NextRequest) {
     ? await db
         .select()
         .from(predictions)
-        .where(and(eq(predictions.ownerId, owner), inArray(predictions.id, carriedIds)))
+        .where(inArray(predictions.id, carriedIds))
     : [];
   const byId = new Map(carriedRows.map((p) => [p.id, p]));
 
@@ -53,6 +51,7 @@ export async function GET(req: NextRequest) {
         .map((p) => ({ ...p, carried: true }));
       return {
         ...r,
+        isViewerRun: r.ownerId === adminOwnerId() && adminOwnerId() !== "",
         predictions: [...fresh, ...carried].sort((a, b) => b.confidence - a.confidence),
       };
     }),
@@ -64,6 +63,7 @@ export async function POST(req: NextRequest) {
     date?: string;
     sports?: string[];
     markets?: string[];
+    includeEvents?: string[];
   } | null;
   if (!body?.date || !/^\d{4}-\d{2}-\d{2}$/.test(body.date) || !body.sports?.length) {
     return Response.json({ error: "date + sports required" }, { status: 400 });
@@ -75,6 +75,7 @@ export async function POST(req: NextRequest) {
       ownerId: ownerFromRequest(req),
       slateDate: body.date,
       sports: body.sports.slice(0, 8),
+      includeEvents: Array.isArray(body.includeEvents) ? body.includeEvents.slice(0, 400) : [],
       markets: Array.isArray(body.markets) ? body.markets.slice(0, 20) : [],
       status: "running",
     })
