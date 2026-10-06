@@ -9,7 +9,7 @@ export const maxDuration = 60;
 // then ripples rating changes + self-improvement through the roster.
 export async function POST(req: NextRequest) {
   try {
-    const summary = await gradePending(ownerFromRequest(req));
+    const summary = await gradePending();
     return Response.json(summary);
   } catch (e) {
     return Response.json(
