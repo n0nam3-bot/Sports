@@ -879,13 +879,13 @@ export async function runPipeline(
     const slateText = pre.map(digest).join("\n\n");
 
     const sportsInSlate = [...new Set(pre.map((g) => g.sport))];
-    const sportExperts = sportsInSlate.map((s) => `EXPERT_${s.toUpperCase()}`);
+    const sportExperts = sportsInSlate.map((s) => { const code = ["dwcs","pfl","ufc"].includes(s) ? "MMA" : s.toUpperCase(); return `${code}_EXPERT`; });
     const scoutCodes = ["QUANT", "MEDIC", "CHRONO", ...sportExperts, "SHARP"];
 
     for (const code of scoutCodes) {
       let a = agent(code);
-      if (!a && code.startsWith("EXPERT_")) {
-         const sportCode = code.split("_")[1].toLowerCase();
+      if (!a && code.endsWith("_EXPERT")) {
+         const sportCode = code.replace("_EXPERT", "").toLowerCase();
          // map dwcs/pfl to mma expert
          const eCode = ["dwcs", "pfl", "ufc"].includes(sportCode) ? "mma" : sportCode;
          a = agent(`expert-${eCode}`) ?? agent(`expert-nfl`); // fallback just in case
@@ -906,7 +906,7 @@ export async function runPipeline(
         SHARP: `${pre.filter((g) => g.odds).length}/${pre.length} games carry posted lines. Key number positions and juice asymmetries noted.`,
       };
       
-      const scopeKey = code.startsWith("EXPERT_") ? "EXPERT" : code;
+      const scopeKey = code.endsWith("_EXPERT") ? "EXPERT" : code;
       let extra = "";
       if (target && a) {
         const intel = await llmJson<{ notes?: string }>(
@@ -1113,7 +1113,7 @@ export async function runPipeline(
       perFamily.set(fam, (perFamily.get(fam) ?? 0) + 1);
       c.finalUnits = cost;
       const eCode = ["dwcs", "pfl", "ufc"].includes(c.game.sport) ? "MMA" : c.game.sport.toUpperCase();
-      c.signals = [...new Set([...c.signals.map(s => s === "MATCHUP" ? "EXPERT" : s), `EXPERT_${eCode}`, "STRATEGA", "CONTRARIAN", "COMMISSIONER", "RISK", "HISTORIAN"])];
+      c.signals = [...new Set([...c.signals.map(s => s === "MATCHUP" ? `${eCode}_EXPERT` : s), `${eCode}_EXPERT`, "STRATEGA", "CONTRARIAN", "COMMISSIONER", "RISK", "HISTORIAN"])];
       card.push(c);
       exposure += cost;
       return cost;
@@ -1216,7 +1216,8 @@ function statLabel(stat: string): string {
   return map[stat] ?? stat.toLowerCase();
 }
 
-const SCOUT_CODES = new Set(["QUANT", "MEDIC", "CHRONO", "EXPERT", "SHARP", "PROPS"]);
+// Sport experts use codename pattern like NHL_EXPERT, MMA_EXPERT
+const SCOUT_CODES = new Set(["QUANT", "MEDIC", "CHRONO", "SHARP", "PROPS"]);
 
 /** Derivatives carry more variance than sides — RISK sizes them down. */
 const REDUCED_SIZE = new Set(["total", "team_total", "player_prop", "1h_total", "1h_spread", "f5_total"]);
@@ -1227,7 +1228,7 @@ function sealedUnits(c: { confidence: number; category: string; signals?: string
 }
 
 export function unitsFor(c: { confidence: number; category: string; signals?: string[] }): number {
-  const convergence = (c.signals ?? []).filter((s) => SCOUT_CODES.has(s)).length;
+  const convergence = (c.signals ?? []).filter((s) => SCOUT_CODES.has(s) || s.endsWith("_EXPERT")).length;
   const u =
     c.confidence >= 68 && convergence >= 5 ? 2 :
     c.confidence >= 63 ? 1.5 :

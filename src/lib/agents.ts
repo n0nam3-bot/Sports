@@ -100,6 +100,13 @@ export async function settleAgentRatings(
   if (!graded.length) return;
   const rows = await db.select().from(agents);
   const byCode = new Map(rows.map((r) => [r.codename, r]));
+  // Also map old-format EXPERT_X signals to the correct agent
+  for (const r of rows) {
+    if (r.codename.endsWith("_EXPERT")) {
+      const sport = r.codename.replace("_EXPERT", "");
+      byCode.set(`EXPERT_${sport}`, r); // old format compatibility
+    }
+  }
   const byId = new Map(rows.map((r) => [r.agentKey || r.id, r]));
   const touched = new Map<string, typeof rows[number]>();
 
