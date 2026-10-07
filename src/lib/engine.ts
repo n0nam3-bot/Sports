@@ -1112,7 +1112,8 @@ export async function runPipeline(
       perGame.set(c.game.eventId, (perGame.get(c.game.eventId) ?? 0) + 1);
       perFamily.set(fam, (perFamily.get(fam) ?? 0) + 1);
       c.finalUnits = cost;
-      c.signals = [...new Set([...c.signals.map(s => s === "MATCHUP" ? "EXPERT" : s), "STRATEGA", "CONTRARIAN", "COMMISSIONER", "RISK", "HISTORIAN"])];
+      const eCode = ["dwcs", "pfl", "ufc"].includes(c.game.sport) ? "MMA" : c.game.sport.toUpperCase();
+      c.signals = [...new Set([...c.signals.map(s => s === "MATCHUP" ? "EXPERT" : s), `EXPERT_${eCode}`, "STRATEGA", "CONTRARIAN", "COMMISSIONER", "RISK", "HISTORIAN"])];
       card.push(c);
       exposure += cost;
       return cost;
@@ -1311,6 +1312,13 @@ async function finishRun(runId: number, ownerId: string, slateDate: string, deci
       `${decision.memo} ${repeats.length} of these ${repeats.length + released} selections were already staked on an earlier run — they are shown again here but stay graded once.`.trim();
   }
 
+  // If a run produced ZERO new picks and carried ZERO repeats, it is dead weight.
+  // Delete it entirely rather than cluttering the ledger with empty rows.
+  if (!finalDecision.repeats?.length && released === 0) {
+    await db.delete(runs).where(eq(runs.id, runId));
+    return;
+  }
+
   await db
     .update(runs)
     .set({ status: "completed", council: finalDecision, carried, completedAt: new Date() })
@@ -1463,11 +1471,17 @@ export async function gradePending(): Promise<{ graded: number; wins: number; lo
           .update(predictions)
           .set({ outcome, finalScore, gradedAt: new Date() })
           .where(eq(predictions.id, p.id));
-        graded++;
-        if (outcome === "win") wins++;
-        else if (outcome === "loss") losses++;
-        else pushes++;
-        creditList.push({ agents: p.agents, outcome, confidence: p.confidence });
+        
+        // Only the canonical (first) instance of a wager credits/blames agents and stats
+        const isDuplicate = await db.select({ id: predictions.id }).from(predictions).where(eq(predictions.dedupeKey, p.dedupeKey)).orderBy(predictions.id).limit(1).then(r => r[0]?.id !== p.id);
+        
+        if (!isDuplicate) {
+            graded++;
+            if (outcome === "win") wins++;
+            else if (outcome === "loss") losses++;
+            else pushes++;
+            creditList.push({ agents: p.agents, outcome, confidence: p.confidence });
+        }
       }
       continue;
     }
