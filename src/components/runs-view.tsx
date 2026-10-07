@@ -59,19 +59,21 @@ export default function RunsView({ runs, grade }: { runs: RunC[]; grade: () => P
 
   // ---- stats computation ----
   function computeStats(runList: RunC[]) {
-    const preds = runList.flatMap((r) => r.predictions).filter((p) => !p.isDuplicate);
-    const graded = preds.filter((p) => p.outcome !== "pending");
-    const w = graded.filter((p) => p.outcome === "win").length;
-    const l = graded.filter((p) => p.outcome === "loss").length;
+    const seen = new Set<string>();
+    const preds = runList.flatMap((r) => r.predictions);
+    let w = 0, l = 0, push = 0, pnlSum = 0, pendingCount = 0;
+    for (const p of preds) {
+      // Only count each unique wager once across all runs
+      const key = p.dedupeKey || `${p.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (p.outcome === "pending") { pendingCount++; continue; }
+      if (p.outcome === "win") { w++; pnlSum += p.units * (p.odds > 0 ? p.odds / 100 : 100 / -p.odds); }
+      else if (p.outcome === "loss") { l++; pnlSum -= p.units; }
+      else if (p.outcome === "push") { push++; }
+    }
     const d = w + l;
-    return {
-      wins: w,
-      losses: l,
-      strike: d ? (w / d) * 100 : null,
-      pnl: preds.reduce((s, p) => s + profit(p), 0),
-      pending: preds.length - graded.length,
-      total: preds.length,
-    };
+    return { wins: w, losses: l, strike: d ? (w / d) * 100 : null, pnl: pnlSum, pending: pendingCount, total: seen.size };
   }
 
   const officialStats = useMemo(() => computeStats(runs.filter((r) => r.isViewerRun)), [runs]);
@@ -212,10 +214,19 @@ export default function RunsView({ runs, grade }: { runs: RunC[]; grade: () => P
           const open = openId === r.id;
           const isAdmin = !!r.isViewerRun;
           const rp = r.predictions;
-          const rg = rp.filter((p) => p.outcome !== "pending" && !p.isDuplicate);
+          // For per-run display, only count picks whose dedupeKey first appeared in THIS run
+          const seenInRun = new Set();
+          const uniqueRp = rp.filter((p) => {
+            const k = p.dedupeKey || String(p.id);
+            if (p.carried) return true; // carried = shown but not re-counted
+            if (seenInRun.has(k)) return false;
+            seenInRun.add(k);
+            return true;
+          });
+          const rg = uniqueRp.filter((p) => p.outcome !== "pending" && !p.carried);
           const rw = rg.filter((p) => p.outcome === "win").length;
           const rl = rg.filter((p) => p.outcome === "loss").length;
-          const rpnl = rp.filter((p) => !p.isDuplicate).reduce((s, p) => s + profit(p), 0);
+          const rpnl = uniqueRp.filter((p) => !p.carried).reduce((s, p) => s + profit(p), 0);
           return (
             <Panel
               key={r.id}
