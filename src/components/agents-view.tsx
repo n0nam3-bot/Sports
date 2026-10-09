@@ -227,10 +227,10 @@ function AgentCard({ agent, reload, isAdmin }: { agent: AgentC; reload: () => vo
       {agent.improvements.length > 0 && (
         <div className="mt-3 border-t border-white/6 pt-2.5">
           <div className="mb-1.5 flex items-center gap-1.5 font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-[#ffb020]">
-            <GitCommitVertical className="h-3.5 w-3.5" /> self-corrections
+            <GitCommitVertical className="h-3.5 w-3.5" /> self-correction
           </div>
           <div className="space-y-1.5">
-            {agent.improvements.slice(-3).reverse().map((imp, i) => (
+            {agent.improvements.slice(-1).map((imp, i) => (
               <div key={i} className="border-l border-[#ffb020]/30 pl-2.5">
                 <div className="font-mono text-[9.5px] uppercase tracking-[0.1em] text-[#ffb020]">
                   {imp.at.slice(0, 10)} · {imp.reason}

@@ -321,6 +321,8 @@ export default function RunsView({ runs, grade }: { runs: RunC[]; grade: () => P
                             const isDuplicate = firstStakeRun && firstStakeRun.id !== r.id;
                             const firstWasAdmin = firstStakeRun?.isViewerRun;
                             
+                            // If an Official run re-selects a pick first ran by Community,
+                            // we show it as a duplicate in the Official run too.
                             return (
                               <tr
                                 key={p.id}
@@ -333,7 +335,7 @@ export default function RunsView({ runs, grade }: { runs: RunC[]; grade: () => P
                                 <td className="py-2 pr-3 text-[#3d4c63]">
                                   {isDuplicate ? (
                                     <span title={`already staked on run #${firstStakeRun?.id}`}>
-                                      <Star className={cx("inline h-3 w-3", firstWasAdmin ? "text-[#ff3d81]" : "text-[#ffb020]")} />
+                                      <Star className={cx("inline h-3 w-3", firstWasAdmin ? "text-[#ff3d81]" : "text-[#39d5ff]") } />
                                     </span>
                                   ) : (
                                     p.sortOrder + 1
