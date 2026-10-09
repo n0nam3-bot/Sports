@@ -878,19 +878,10 @@ export async function runPipeline(
 
     const slateText = pre.map(digest).join("\n\n");
 
-    const sportsInSlate = [...new Set(pre.map((g) => g.sport))];
-    const sportExperts = sportsInSlate.map((s) => { const code = ["dwcs","pfl","ufc"].includes(s) ? "MMA" : s.toUpperCase(); return `${code}_EXPERT`; });
-    const scoutCodes = ["QUANT", "MEDIC", "CHRONO", ...sportExperts, "SHARP"];
-
+    const scoutCodes = ["QUANT", "MEDIC", "CHRONO", "SHARP"];
     for (const code of scoutCodes) {
-      let a = agent(code);
-      if (!a && code.endsWith("_EXPERT")) {
-         const sportCode = code.replace("_EXPERT", "").toLowerCase();
-         // map dwcs/pfl to mma expert
-         const eCode = ["dwcs", "pfl", "ufc"].includes(sportCode) ? "mma" : sportCode;
-         a = agent(`expert-${eCode}`) ?? agent(`expert-nfl`); // fallback just in case
-      }
-      const target = a ? targetFor(a.id, keys) : null;
+      const a = agent(code);
+      const target = llmEnabled && a ? targetFor(a.id, keys, true) : null;
       const injGames = pre.filter((g) => g.injuries.length > 0);
       const fatigueGames = pre.filter((g) => g.rest && (g.rest.homeB2B || g.rest.awayB2B || g.rest.home3in4 || g.rest.away3in4));
       
@@ -902,11 +893,9 @@ export async function runPipeline(
         CHRONO: fatigueGames.length
           ? `fatigue spots identified: ${fatigueGames.slice(0, 3).map((g) => { const r = g.rest!; return `${g.matchup} (${r.homeB2B ? g.home.abbr + " B2B" : r.awayB2B ? g.away.abbr + " B2B" : r.home3in4 ? g.home.abbr + " 3-in-4" : g.away.abbr + " 3-in-4"})`; }).join(", ")}${fatigueGames.length > 3 ? ` +${fatigueGames.length - 3} more` : ""}.`
           : `no significant rest or travel edges on this slate.`,
-        EXPERT: `tactical analysis complete — sport-specific factors (schemes, weather, matchups) priced.`,
         SHARP: `${pre.filter((g) => g.odds).length}/${pre.length} games carry posted lines. Key number positions and juice asymmetries noted.`,
       };
       
-      const scopeKey = code.endsWith("_EXPERT") ? "EXPERT" : code;
       let extra = "";
       if (target && a) {
         const intel = await llmJson<{ notes?: string }>(
@@ -920,8 +909,47 @@ export async function runPipeline(
       await trace(runId, {
         layer: "scout",
         agent: code,
-        message: `${scope[scopeKey]}${extra}`,
+        message: `${scope[code]}${extra}`,
         mood: "info",
+      });
+    }
+
+    // --- Phase 1.5: Tactical Synthesis (Sport Experts) ---
+    // Experts now review the raw candidates and apply tactical knowledge (pitchers, schemes, cardio).
+    const sportsInSlate = [...new Set(pre.map((g) => g.sport))];
+    for (const sport of sportsInSlate) {
+      const eCode = ["dwcs", "pfl", "ufc"].includes(sport) ? "mma" : sport;
+      const a = agent(`expert-${eCode}`);
+      const target = llmEnabled && a ? targetFor(a.id, keys, true) : null;
+      if (!a) continue;
+
+      const candidatesForSport = allCandidates.filter(c => c.game.sport === sport);
+      let tacticalNotes = "analyzed tactical factors.";
+      
+      if (target && candidatesForSport.length > 0) {
+        const review = await llmJson<{ vetos: number[], boosts: number[], log: string }>(
+          target, a.prompt,
+          `Perform a professional tactical review of these ${sport.toUpperCase()} candidates.\nEvaluate Pitcher/Lineup data, defensive schemes, or fighter styles.\nReturn JSON {"vetos": [ids], "boosts": [ids], "log": "..."}.\n\nCANDIDATES:\n${candidatesForSport.map(c => `#${c.id} ${c.pick} | ${c.thesis}`).join('\n')}`,
+          { timeoutMs: 22000 }
+        );
+        if (review) {
+          (review.vetos || []).forEach(id => {
+            const c = allCandidates.find(x => x.id === id);
+            if (c) { c.confidence -= 20; c.vetoed = "specialist tactical veto"; }
+          });
+          (review.boosts || []).forEach(id => {
+            const c = allCandidates.find(x => x.id === id);
+            if (c) c.confidence += 8;
+          });
+          tacticalNotes = `${review.log} [${target.label}]`;
+        }
+      }
+
+      await trace(runId, {
+        layer: "scout",
+        agent: a.codename,
+        message: `Tactical review for ${sport.toUpperCase()} complete. ${tacticalNotes}`,
+        mood: "info"
       });
     }
 
@@ -1002,70 +1030,73 @@ export async function runPipeline(
         if (v.thesis && v.thesis.length > 20) c.thesis = v.thesis;
       }
       const survived = new Set((out?.verdicts ?? []).map((v) => v.id));
-      strategaDetails = out?.verdicts?.map((v: any) => `#${v.id} (conf ${v.confidence}): ${v.thesis}`).join(" | ") || "no detailed theses returned";
-                  if (survived.size > 0) {
+      strategaDetails = out?.verdicts?.map((v: any) => `#${v.id}: ${v.thesis}`).join(" | ") || "theses formulated.";
+      if (survived.size > 0) {
         for (const c of allCandidates) {
-          if (top.includes(c) && !survived.has(c.id)) c.confidence -= 12; // analyst passed
+          if (top.includes(c) && !survived.has(c.id)) {
+            c.confidence -= 15;
+            c.vetoed = "Stratega did not approve for release.";
+          }
         }
       }
+    } else {
+      // Heuristic synthesis: favor convergence
+      allCandidates.forEach(c => {
+        if (c.signals.length < 3) c.confidence -= 5;
+        if (c.signals.includes("QUANT") && c.edge > 2.5) c.confidence += 4;
+      });
     }
-        await trace(runId, {
+
+    await trace(runId, {
       layer: "analyst",
       agent: "STRATEGA",
-      message: `forged ${allCandidates.length} raw signals — top ${top.length} theses graded for release. Details: ${strategaDetails}`,
+      message: `synthesis complete — top ${top.length} candidates graded. Reasoning: ${strategaDetails}`,
       mood: "info",
     });
 
     // contrarian audit
     let vetoCount = 0;
     for (const c of allCandidates) {
+      if (c.vetoed) continue;
       const kills: string[] = [];
-      if (c.category === "moneyline" && c.odds < -260) kills.push("juice too heavy — no price value on a massive favorite");
-      // Combat prices are the model's own fair numbers, so a heavily juiced
-      // read carries no edge unless a book is far longer. Refuse those.
-      if (c.category.startsWith("fight_") && c.odds < -250)
-        kills.push("model price too short — nothing to beat at this number");
-      if (c.signals.includes("SHARP") && c.game.odds && Math.abs(c.game.odds.homeSpread ?? 0) >= 14 && c.category === "spread")
-        kills.push("double-digit spread in a variance sport — trap profile");
-      if (c.confidence < 54) kills.push("edge below professional threshold");
-      if (c.game.odds && Math.abs(c.game.odds.homeSpread ?? 0) >= 17 && c.category === "spread")
-        kills.push("bloated chalk — model edge is real but the number is untouchable");
+      // Heuristic vetos
+      if (c.category === "moneyline" && c.odds < -260) kills.push("excessive juice");
+      if (c.category.startsWith("fight_") && c.odds < -250) kills.push("model price too short");
+      if (c.confidence < 54) kills.push("edge sub-threshold");
+      
       if (kills.length) {
         c.vetoed = kills[0];
         vetoCount++;
-      } else if (c.category === "total" && c.signals.length < 3) {
-        c.discount = "single-signal total — sized down one notch";
-        c.confidence -= 3;
       }
     }
+
     const contrarian = agent("CONTRARIAN");
     const contraTarget = llmEnabled && contrarian ? targetFor(contrarian.id, keys, true) : null;
-    let contraDetails = "no LLM used";
-    if (contraTarget && contrarian && !vetoCount && allCandidates.length > 2) {
-      interface Audit { id: number; verdict: "CONFIRM" | "DISCOUNT" | "VETO"; why?: string }
-      const out = await llmJson<{ audits?: Audit[] }>(
+    let contraDetails = "system audit applied.";
+
+    if (contraTarget && contrarian && allCandidates.filter(c => !c.vetoed).length > 0) {
+      const active = allCandidates.filter(c => !c.vetoed).slice(0, 12);
+      const out = await llmJson<{ audits?: { id: number, verdict: string, why: string }[] }>(
         contraTarget,
         contrarian.prompt,
-        `Audit these candidates. Return JSON {"audits":[{"id":1,"verdict":"CONFIRM","why":"…"}]}.\n\n${top.map((c) => `#${c.id} ${c.pick} | ${c.game.matchup} | conf ${c.confidence.toFixed(0)} | ${c.thesis}`).join("\n").slice(0, 9000)}`,
-        { timeoutMs: 24000 },
+        `Audit these candidates. Return JSON {"audits":[{"id":1,"verdict":"CONFIRM|DISCOUNT|VETO","why":"..."}]}.\n\nCANDIDATES:\n${active.map(c => `#${c.id} ${c.pick} | ${c.thesis}`).join('\n')}`,
+        { timeoutMs: 24000 }
       );
-      for (const adt of out?.audits ?? []) {
-        const c = allCandidates.find((x) => x.id === adt.id);
-        if (!c) continue;
-        if (adt.verdict === "VETO") {
-          c.vetoed = adt.why || "killed by the contrarian";
-          vetoCount++;
-        } else if (adt.verdict === "DISCOUNT") {
-          c.discount = adt.why || "discounted";
-          c.confidence = Math.max(45, c.confidence - 5);
-        }
+      if (out?.audits) {
+        out.audits.forEach(adt => {
+          const c = allCandidates.find(x => x.id === adt.id);
+          if (!c) return;
+          if (adt.verdict === "VETO") { c.vetoed = adt.why; vetoCount++; }
+          else if (adt.verdict === "DISCOUNT") { c.confidence -= 8; c.discount = adt.why; }
+        });
+        contraDetails = out.audits.filter(a => a.verdict !== "CONFIRM").map(a => `#${a.id} ${a.verdict}: ${a.why}`).join(" | ") || "all candidates confirmed.";
       }
-      contraDetails = out?.audits?.filter((a: any) => a.verdict !== "CONFIRM").map((a: any) => `#${a.id} ${a.verdict}: ${a.why}`).join(" | ") || "all confirmed";
     }
-        await trace(runId, {
+
+    await trace(runId, {
       layer: "analyst",
       agent: "CONTRARIAN",
-      message: `audit complete — ${vetoCount} vetoed, ${allCandidates.filter((c) => c.discount && !c.vetoed).length} discounted, ${allCandidates.filter((c) => !c.vetoed).length} cleared. Notes: ${contraDetails}`,
+      message: `security audit complete. ${vetoCount} vetoed. Details: ${contraDetails}`,
       mood: vetoCount ? "warn" : "info",
     });
 
