@@ -80,20 +80,25 @@ export default function RunsView({ runs, grade }: { runs: RunC[]; grade: () => P
   const communityStats = useMemo(() => computeStats(runs.filter((r) => !r.isViewerRun)), [runs]);
   const filteredStats = useMemo(() => computeStats(filtered), [filtered]);
 
-  // ---- admin dedupe keys for star matching ----
-  const adminDedupeKeys = useMemo(() => {
-    const keys = new Set<string>();
-    runs.filter((r) => r.isViewerRun).forEach((r) =>
-      r.predictions.forEach((p) => {
-        if (p.dedupeKey) keys.add(p.dedupeKey);
-      }),
-    );
-    return keys;
+  // Map of dedupeKey -> first run that staked it
+  const firstStakes = useMemo(() => {
+    const map = new Map<string, RunC>();
+    [...runs].sort((a, b) => a.id - b.id).forEach(r => {
+      r.predictions.forEach(p => {
+        if (p.dedupeKey && !map.has(p.dedupeKey)) {
+          map.set(p.dedupeKey, r);
+        }
+      });
+    });
+    return map;
   }, [runs]);
 
-  // sort: official on top, community below
+  // sort: Date first, then official on top
   const sorted = useMemo(() => {
     return [...filtered].sort((a, b) => {
+      if (a.slateDate !== b.slateDate) {
+        return b.slateDate.localeCompare(a.slateDate);
+      }
       if (a.isViewerRun && !b.isViewerRun) return -1;
       if (!a.isViewerRun && b.isViewerRun) return 1;
       return b.id - a.id;
@@ -183,7 +188,7 @@ export default function RunsView({ runs, grade }: { runs: RunC[]; grade: () => P
       {/* ============ Stats Strip ============ */}
       <div className="flex flex-wrap gap-2">
         <StatBlock
-          label={viewMode === "official" ? "official record" : viewMode === "community" ? "community record" : "overall record"}
+          label={sportFilter ? `${sportFilter.toUpperCase()} record` : viewMode === "official" ? "official record" : viewMode === "community" ? "community record" : "overall record"}
           value={`${st.wins}–${st.losses}`}
           tone="text-[#e8f1fb]"
         />
@@ -194,11 +199,26 @@ export default function RunsView({ runs, grade }: { runs: RunC[]; grade: () => P
         />
         <StatBlock label="units p/l" value={`${st.pnl >= 0 ? "+" : ""}${st.pnl.toFixed(1)}u`} tone={st.pnl >= 0 ? "text-[#37ff8b]" : "text-[#ff4757]"} />
         <StatBlock label="pending" value={String(st.pending)} tone="text-[#ffb020]" />
-        {viewMode === "all" && officialStats.total > 0 && communityStats.total > 0 && (
+        
+        {/* Dynamic breakdown blocks */}
+        {viewMode === "all" && !sportFilter && officialStats.total > 0 && communityStats.total > 0 && (
           <>
             <StatBlock label="official WR" value={officialStats.strike != null ? `${officialStats.strike.toFixed(1)}%` : "—"} tone={officialStats.strike != null && officialStats.strike >= 52.4 ? "text-[#ff3d81]" : "text-[#ffb020]"} />
             <StatBlock label="community WR" value={communityStats.strike != null ? `${communityStats.strike.toFixed(1)}%` : "—"} tone="text-[#8fa3bd]" />
           </>
+        )}
+        
+        {sportFilter && viewMode === "all" && (
+           <div className="hidden min-w-[200px] flex-1 items-center gap-3 md:flex">
+             <Panel className="flex w-full items-center gap-3 px-4 py-2 border-[#39d5ff]/30">
+               <TrendingUp className="h-4 w-4 text-[#39d5ff]" />
+               <p className="font-mono text-[9px] uppercase leading-relaxed tracking-[0.1em] text-[#8fa3bd]">
+                 viewing <span className="text-[#39d5ff] font-bold">{sportFilter.toUpperCase()}</span> performance. 
+                 Official: {officialStats.wins}-{officialStats.losses} ({officialStats.strike?.toFixed(1)}%) | 
+                 Community: {communityStats.wins}-{communityStats.losses} ({communityStats.strike?.toFixed(1)}%)
+               </p>
+             </Panel>
+           </div>
         )}
       </div>
 
@@ -297,24 +317,23 @@ export default function RunsView({ runs, grade }: { runs: RunC[]; grade: () => P
                         </thead>
                         <tbody>
                           {rp.map((p) => {
-                            const matchesAdmin = !isAdmin && p.dedupeKey && adminDedupeKeys.has(p.dedupeKey);
+                            const firstStakeRun = p.dedupeKey ? firstStakes.get(p.dedupeKey) : null;
+                            const isDuplicate = firstStakeRun && firstStakeRun.id !== r.id;
+                            const firstWasAdmin = firstStakeRun?.isViewerRun;
+                            
                             return (
                               <tr
                                 key={p.id}
                                 className={cx(
                                   "border-t border-white/5",
-                                  p.isDuplicate ? "text-[#5f7089] opacity-50" :
+                                  isDuplicate ? "text-[#5f7089] opacity-50" :
                                   !isAdmin ? "text-[#8fa3bd]" : "text-[#b8c6da]",
                                 )}
                               >
                                 <td className="py-2 pr-3 text-[#3d4c63]">
-                                  {matchesAdmin ? (
-                                    <span title="matches an official prediction — graded there">
-                                      <Star className="inline h-3 w-3 text-[#ff3d81]" />
-                                    </span>
-                                  ) : p.isDuplicate && p.canonRunId ? (
-                                    <span title={`same as run #${p.canonRunId}`}>
-                                      <Star className="inline h-3 w-3 text-[#ffb020]" />
+                                  {isDuplicate ? (
+                                    <span title={`already staked on run #${firstStakeRun?.id}`}>
+                                      <Star className={cx("inline h-3 w-3", firstWasAdmin ? "text-[#ff3d81]" : "text-[#ffb020]")} />
                                     </span>
                                   ) : (
                                     p.sortOrder + 1
@@ -324,20 +343,14 @@ export default function RunsView({ runs, grade }: { runs: RunC[]; grade: () => P
                                 <td className="max-w-[260px] py-2 pr-3">
                                   <span className={cx(
                                     "font-sans text-[12px] font-semibold",
-                                    p.isDuplicate ? "text-[#5f7089] line-through" :
-                                    matchesAdmin ? "text-[#ff3d81]" :
+                                    isDuplicate ? "text-[#5f7089] line-through" :
                                     !isAdmin ? "text-[#8fa3bd]" : "text-[#e8f1fb]",
                                   )}>
                                     {p.pick}
                                   </span>
-                                  {matchesAdmin && (
-                                    <span className="ml-2 font-mono text-[8px] uppercase tracking-wider text-[#ff3d81]">
-                                      ★ matches official
-                                    </span>
-                                  )}
-                                  {p.isDuplicate && p.canonRunId && (
+                                  {isDuplicate && (
                                     <span className="ml-2 font-mono text-[8px] uppercase tracking-wider text-[#8fa3bd]">
-                                      graded on #{p.canonRunId}
+                                      staked on #{firstStakeRun?.id} {firstWasAdmin ? "(Official)" : "(Community)"}
                                     </span>
                                   )}
                                 </td>
