@@ -1,7 +1,7 @@
 import { db } from "@/db";
 import { agents, type AgentRow, type ImprovementEntry } from "@/db/schema";
 import { and, eq } from "drizzle-orm";
-import { targetFor } from "./llm";
+import { configuredProviders, llmChat, targetFor, type KeyBag } from "./llm";
 import { ensureSchema } from "./schema";
 import { HOUSE } from "./owner";
 
@@ -23,13 +23,13 @@ export const AGENT_DEFS: AgentDef[] = [
   { id: "scout-sharp", codename: "SHARP", layer: "scout", sortOrder: 4, title: "Market & Line-Value Scout", job: "Reads the betting market itself.", prompt: "You are SHARP. Recommend which side of each number holds the value." },
   { id: "scout-props", codename: "PROPS", layer: "scout", sortOrder: 5, title: "Player Spotlight & Props Scout", job: "Hunts individual player angles.", prompt: "You are PROPS. Quality over quantity." },
   // Sport Specialists
-  { id: "expert-nfl", codename: "NFL_EXPERT", layer: "scout", sortOrder: 6, title: "NFL Tactical Scout", job: "Analyzes defense coverage vs offense plays, pass/rush heavy tendencies, trenches/secondary injuries, and weather.", prompt: "You are the NFL_EXPERT. Analyze defensive schemes vs offensive play calling, run/pass splits, weather impact, and positional mismatches. State who the matchup favors." },
-  { id: "expert-nba", codename: "NBA_EXPERT", layer: "scout", sortOrder: 7, title: "NBA Tactical Scout", job: "Analyzes pace, matchup advantages in the paint vs perimeter, and rotation changes.", prompt: "You are the NBA_EXPERT. Analyze pace, interior vs perimeter defense, and bench depth. State who the matchup favors." },
-  { id: "expert-mlb", codename: "MLB_EXPERT", layer: "scout", sortOrder: 8, title: "MLB Tactical Scout", job: "Analyzes pitching matchups, bullpen depth, wOBA splits, and park factors.", prompt: "You are the MLB_EXPERT. Analyze starting pitching, bullpen usage, splits, and weather. State who the matchup favors." },
-  { id: "expert-nhl", codename: "NHL_EXPERT", layer: "scout", sortOrder: 9, title: "NHL Tactical Scout", job: "Analyzes expected goals, goalie form, and special teams.", prompt: "You are the NHL_EXPERT. Analyze 5v5 metrics, power play vs penalty kill, and goaltending form. State who the matchup favors." },
-  { id: "expert-mma", codename: "MMA_EXPERT", layer: "scout", sortOrder: 10, title: "MMA Tactical Scout", job: "Analyzes stances, striking vs grappling, submission threats, cardio, and pace.", prompt: "You are the MMA_EXPERT. Analyze fighting styles (striker vs grappler), finish dependency, gas tank over 3/5 rounds, and path to victory." },
-  { id: "expert-ncaaf", codename: "NCAAF_EXPERT", layer: "scout", sortOrder: 11, title: "NCAAF Tactical Scout", job: "Analyzes talent disparity, trench mismatches, and scheme collisions.", prompt: "You are the NCAAF_EXPERT. Analyze air raid vs pro style, home-field advantage, and motivational spots. State who the matchup favors." },
-  { id: "expert-ncaab", codename: "NCAAB_EXPERT", layer: "scout", sortOrder: 12, title: "NCAAB Tactical Scout", job: "Analyzes tempo, rebounding margins, and interior defense.", prompt: "You are the NCAAB_EXPERT. Analyze tempo, 3pt reliance, and interior size. State who the matchup favors." },
+  { id: "expert-nfl", codename: "NFL_EXPERT", layer: "scout", sortOrder: 6, title: "NFL Tactical Scout", job: "Analyzes defensive coverage (2-high vs single-high), trench injuries, QB-receiver chemistry vs specific secondaries, and weather/field condition impact.", prompt: "You are the NFL_EXPERT. Analyze defensive coverage types vs offensive playbooks, pass/rush heavy splits, trench mismatches, and weather impact. Focus on who benefits from specific defensive injuries. State which side and market (Spread/Total/Prop) holds the tactical edge." },
+  { id: "expert-nba", codename: "NBA_EXPERT", layer: "scout", sortOrder: 7, title: "NBA Tactical Scout", job: "Analyzes pace-up/down spots, perimeter vs interior defensive efficiency, and bench-usage spikes due to starters' load management.", prompt: "You are the NBA_EXPERT. Analyze pace, defensive efficiency by zone, and rotation changes. Identify 'usage traps' where a missing starter's points won't be replaced 1:1. State the tactical edge." },
+  { id: "expert-mlb", codename: "MLB_EXPERT", layer: "scout", sortOrder: 8, title: "MLB Tactical Scout", job: "Analyzes starter K/BB rates vs batting splits, bullpen usage over the last 3 days, and park factors (humidity/wind) affecting run expectancy.", prompt: "You are the MLB_EXPERT. Analyze pitcher velocity/form, bullpen fatigue, and lefty/righty splits. Focus on how weather (wind/temp) moves the run-expectancy baseline. State the tactical edge." },
+  { id: "expert-nhl", codename: "NHL_EXPERT", layer: "scout", sortOrder: 9, title: "NHL Tactical Scout", job: "Analyzes expected goals (xG), high-danger chances allowed, goalie SV% on unblocked shots, and special teams (PP/PK) volatility.", prompt: "You are the NHL_EXPERT. Analyze high-danger scoring chances, goaltending form, and special team matchups. State the tactical edge." },
+  { id: "expert-mma", codename: "MMA_EXPERT", layer: "scout", sortOrder: 10, title: "MMA Tactical Scout", job: "Analyzes southpaw vs orthodox counters, striking output vs grappling control, finish tendencies in round 1 vs 2, and gas tank durability over 3/5 rounds.", prompt: "You are the MMA_EXPERT. Analyze stance matchups, sub threats, and striking-accuracy gaps. Evaluate cardio/pace sustainability over 3 or 5 rounds. Focus on finish probability vs decision likelihood. State the tactical edge." },
+  { id: "expert-ncaaf", codename: "NCAAF_EXPERT", layer: "scout", sortOrder: 11, title: "NCAAF Tactical Scout", job: "Analyzes recruiting talent gaps, transfer-portal impact on cohesion, and specific situational spots (revenge/lookahead).", prompt: "You are the NCAAF_EXPERT. Analyze talent disparity, scheme cohesion, and situational motivation. Focus on trench mismatches. State the tactical edge." },
+  { id: "expert-ncaab", codename: "NCAAB_EXPERT", layer: "scout", sortOrder: 12, title: "NCAAB Tactical Scout", job: "Analyzes defensive pressure types (press vs zone), 3pt reliance/variance, and rebounding margins at home vs away.", prompt: "You are the NCAAB_EXPERT. Analyze tempo, 3pt variance, and rebounding differentials. State the tactical edge." },
   // ---------------- ANALYSTS (Layer 2) ----------------
   { id: "analyst-stratega", codename: "STRATEGA", layer: "analyst", sortOrder: 13, title: "Lead Game Analyst", job: "Synthesizes scouts into release-grade candidates.", prompt: "You are STRATEGA. Weight convergence: 3+ scouts pointing the same direction = real edge." },
   { id: "analyst-contrarian", codename: "CONTRARIAN", layer: "analyst", sortOrder: 14, title: "Devil's Advocate", job: "Attacks every candidate bet before the council.", prompt: "You are CONTRARIAN. Audit every candidate bet. VETO bad prices or public traps." },
@@ -95,10 +95,10 @@ const K = 28;
 
 export async function settleAgentRatings(
   graded: { agents: string[]; outcome: string; confidence: number }[],
-  
 ): Promise<void> {
   if (!graded.length) return;
-  const rows = await db.select().from(agents);
+  // Always settle against the HOUSE roster for global reputation
+  const rows = await db.select().from(agents).where(eq(agents.ownerId, HOUSE));
   const byCode = new Map(rows.map((r) => [r.codename, r]));
   // Also map old-format EXPERT_X signals to the correct agent
   for (const r of rows) {
@@ -151,23 +151,68 @@ async function maybeSelfImprove(row: (typeof agents.$inferSelect)): Promise<void
   // cooldown: at most one rewrite per 6 graded results
   if (imps.length > 0 && total - (imps.length * 6) < 6) return;
 
+  const reason = `Strike rate ${(rate * 100).toFixed(1)}% after ${total} graded bets`;
+  await rewriteAgentPlaybook(row, reason);
+}
+
+/**
+ * Genuinely rewrites an agent's prompt based on its performance data.
+ * If LLMs are available, it uses them to synthesize a new playbook.
+ * If not, it falls back to the static directive.
+ */
+export async function rewriteAgentPlaybook(
+  row: typeof agents.$inferSelect,
+  reason: string,
+  keys: KeyBag = {}
+): Promise<void> {
+  const total = row.wins + row.losses;
+  const rate = total > 0 ? row.wins / total : 0.5;
   const directive = buildDirective(row, rate);
+  
+  // Try to use a "Meta-Analyst" LLM to rewrite the prompt.
+  // We prefer the provider assigned to this agent if possible.
+  const target = targetFor(row.agentKey, keys, true) || configuredProviders(keys)[0];
+  let finalPrompt = `${row.prompt}\n\nSELF-CORRECTION LOG (${new Date().toISOString().slice(0,10)}):\n${directive}`;
+  let improvementDetail = `Static directive fallback: ${directive}`;
+
+  if (target) {
+    const metaPrompt = `You are the NEONSLIP Meta-Analyst.
+An AI Betting Agent ("${row.codename}") has underperformed with a win rate of ${(rate * 100).toFixed(1)}%.
+Its Job: ${row.job}
+Its Current Playbook:
+---
+${row.prompt}
+---
+The Lead Analyst's Feedback: ${directive}
+
+Task: Rewrite the Agent's Playbook prompt to be more accurate and avoid past mistakes. 
+Incorporate the specific tactical feedback. Keep it professional and technical.
+Output ONLY the new prompt text. Do not include any meta-commentary.`;
+
+    const rewrite = await llmChat(target, "You rewrite AI prompts for better sports betting accuracy.", metaPrompt, { timeoutMs: 25000 });
+    if (rewrite && rewrite.length > 50) {
+      finalPrompt = rewrite.slice(0, 6000);
+      improvementDetail = `Genuinely rewritten by ${target.label} to address: ${directive}`;
+    }
+  }
+
+  const imps: ImprovementEntry[] = row.improvements ?? [];
   const entry: ImprovementEntry = {
     at: new Date().toISOString(),
-    reason: `Strike rate ${(rate * 100).toFixed(1)}% after ${total} graded bets`,
-    detail: directive,
+    reason,
+    detail: improvementDetail,
     ratingBefore: row.rating,
-    ratingAfter: row.rating + 18,
+    ratingAfter: row.rating, // we don't necessarily bump rating on rewrite anymore, let it earn it
   };
-  const newPrompt = `${row.prompt}\n\nSELF-CORRECTION LOG (${entry.at.slice(0, 10)}):\n${directive}`;
+
   await db
     .update(agents)
     .set({
-      prompt: newPrompt.slice(0, 6000),
-      rating: Math.min(1550, row.rating + 18), // reset bump after retraining
-      wins: Math.floor(row.wins * 0.4),
-      losses: Math.floor(row.losses * 0.4),
-      pushes: Math.floor(row.pushes * 0.4),
+      prompt: finalPrompt,
+      // reset partial stats so it starts fresh with the new prompt
+      wins: Math.floor(row.wins * 0.3),
+      losses: Math.floor(row.losses * 0.3),
+      pushes: Math.floor(row.pushes * 0.3),
       improvements: [...imps, entry].slice(-12),
       updatedAt: new Date(),
     })

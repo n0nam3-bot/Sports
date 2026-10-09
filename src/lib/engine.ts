@@ -792,8 +792,10 @@ export async function runPipeline(
 ): Promise<void> {
   const [run] = await db.select().from(runs).where(eq(runs.id, runId));
   if (!run) return;
-  await ensureAgentsSeeded();
-  const roster = await db.select().from(agents);
+  
+  // Always use the HOUSE roster for the shared winrate and global playbooks.
+  await ensureAgentsSeeded(HOUSE);
+  const roster = await db.select().from(agents).where(eq(agents.ownerId, HOUSE));
   const agent = (key: string) => roster.find((a) => a.codename === key || a.agentKey === key);
   const nowMode = targetFor("scout-quant", keys) ? "llm" : "heuristic";
 

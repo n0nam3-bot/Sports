@@ -248,12 +248,14 @@ export function buildEnhancedCombatModel(
     const cardioH = homeProfile.decisionPct > 40 ? "proven" : homeProfile.decisionPct < 15 ? "suspect" : "average";
     const cardio = `${awayProfile.displayName} cardio is ${cardioA}, ${homeProfile.displayName} is ${cardioH}`;
 
+    const under15 = Math.min(0.85, Math.max(0.1, pFinish * (scheduledRounds === 5 ? 0.45 : 0.65)));
+
     summaryLines = [
       `${weightClass}${scheduledRounds === 5 ? " · 5-round" : ""}`,
       stanceNote + (reachNote ? ` · ${reachNote}` : ""),
       strNote,
       tdNote,
-      `${pace}. ${cardio}`,
+      `${pace}. ${cardio}. u1.5 rds prob: ${(under15 * 100).toFixed(0)}%.`,
     ];
   } else {
     // Record-only fallback
