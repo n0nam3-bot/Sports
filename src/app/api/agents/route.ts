@@ -2,12 +2,12 @@ import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { agents } from "@/db/schema";
 import { and, eq } from "drizzle-orm";
-import { listAgents } from "@/lib/agents";
+import { listAgents, rewriteAgentPlaybook } from "@/lib/agents";
 import { keysFromRequest, llmEnabledFromRequest, targetFor } from "@/lib/llm";
 import { isAdminRequest, ownerFromRequest } from "@/lib/owner";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 30;
+export const maxDuration = 45;
 
 export async function GET(req: NextRequest) {
   const keys = keysFromRequest(req);
@@ -61,27 +61,14 @@ export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => null);
   if (!body?.id) return Response.json({ error: "id required" }, { status: 400 });
   
-  const owner = ownerFromRequest(req);
-  const [row] = await db.select().from(agents).where(and(eq(agents.ownerId, "house"), eq(agents.agentKey, body.id)));
-  if (!row) return Response.json({ error: "not found" }, { status: 404 });
-  
-  const imps = row.improvements ?? [];
-  const entry = {
-    at: new Date().toISOString(),
-    reason: "Operator Forced Rewrite",
-    detail: "Admin triggered a manual playbook rebuild.",
-    ratingBefore: row.rating,
-    ratingAfter: row.rating,
-  };
-  const newPrompt = `${row.prompt}\n\nSELF-CORRECTION LOG (${entry.at.slice(0, 10)}):\nAdmin triggered a manual playbook rebuild. Discard stale approaches.`;
-  
-  await db.update(agents)
-    .set({
-      prompt: newPrompt.slice(0, 6000),
-      improvements: [...imps, entry].slice(-12),
-      updatedAt: new Date(),
-    })
+  const [row] = await db
+    .select()
+    .from(agents)
     .where(and(eq(agents.ownerId, "house"), eq(agents.agentKey, body.id)));
+  if (!row) return Response.json({ error: "not found" }, { status: 404 });
+
+  const keys = keysFromRequest(req);
+  await rewriteAgentPlaybook(row, "Operator Forced Rewrite", keys);
     
   return Response.json({ ok: true });
 }
