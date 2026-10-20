@@ -13,6 +13,7 @@ import { predictions, runs } from "@/db/schema";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { ensureSchema } from "@/lib/schema";
 import { ownerFromRequest } from "@/lib/owner";
+import { scrub } from "@/lib/scrub";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 30;
@@ -60,7 +61,7 @@ export async function GET(req: NextRequest) {
           const isDuplicate = canon && canon.id !== p.id;
           const canonRunId = isDuplicate ? canon!.runId : null;
           return {
-            ...p,
+            ...scrub(p),
             isDuplicate,
             canonRunId,
             // Use the canonical outcome for display even on duplicate rows —
@@ -70,7 +71,7 @@ export async function GET(req: NextRequest) {
           };
         });
       return {
-        ...r,
+        ...scrub(r),
         predictions: predictions_annotated,
         isViewerRun: r.ownerId === viewer,
       };
