@@ -21,7 +21,6 @@ const ICONS: Record<string, typeof Brain> = {
   "scout-quant": Sigma,
   "scout-medic": Stethoscope,
   "scout-chrono": Hourglass,
-  "scout-matchup": Swords,
   "scout-sharp": LineChart,
   "scout-props": Crosshair,
   "analyst-stratega": Brain,
@@ -44,25 +43,28 @@ const LAYER_META: Record<string, { title: string; tone: string; blurb: string }>
   scout: {
     title: "Layer 01 — Scout Division",
     tone: "cyan",
-    blurb: "Field agents. Raw intel only: stats, injuries, rest, matchups, market reads, player spots.",
+    blurb: "Signal producers and sport specialists. An agent is credited only on picks its own signal backed, so each builds its own record.",
   },
   analyst: {
     title: "Layer 02 — Analyst Desk",
     tone: "violet",
-    blurb: "Synthesis engine. Fuses scout intel into release-grade candidates — and tries to kill them.",
+    blurb: "Challengers. Credited on converged and contrarian picks; with LLM keys on they can trim or veto a candidate — with a concrete reason, within hard limits.",
   },
   council: {
     title: "Layer 03 — War Council",
     tone: "magenta",
-    blurb: "Final authority. Memory, ranking, bankroll. Only its survivors make your slip.",
+    blurb: "Gates and unit management: track-record gating, card assembly, fractional-Kelly sizing. Passing is a valid decision.",
   },
 };
 
 export default function AgentsView({ agents, reload, isAdmin }: { agents: AgentC[]; reload: () => void; isAdmin?: boolean }) {
   const layers = ["scout", "analyst", "council"] as const;
-  const totalW = agents.reduce((s, a) => s + a.wins, 0);
-  const totalL = agents.reduce((s, a) => s + a.losses, 0);
-  const totalP = agents.reduce((s, a) => s + a.pushes, 0);
+  // The COMMISSIONER is credited on every released pick, so its record IS the card's record.
+  // (Summing every agent would count one pick once per agent that backed it.)
+  const card = agents.find((a) => a.codename === "COMMISSIONER");
+  const totalW = card?.wins ?? 0;
+  const totalL = card?.losses ?? 0;
+  const totalP = card?.pushes ?? 0;
   const totalDecisive = totalW + totalL;
   const globalWinrate = totalDecisive > 0 ? (totalW / totalDecisive) * 100 : 0;
   const totalPredictions = totalW + totalL + totalP;
@@ -76,10 +78,10 @@ export default function AgentsView({ agents, reload, isAdmin }: { agents: AgentC
         <h2 className="font-display text-2xl font-bold uppercase tracking-tight title-stroke">The Roster</h2>
         <Chip tone="violet">{agents.length} agents</Chip>
         <Chip tone={avgRating >= 1500 ? "green" : "amber"}>fleet rating {avgRating.toFixed(0)}</Chip>
-        <Chip tone="slate">{totalW}W – {totalL}L collective</Chip>
-        <Chip tone="cyan">Global: {globalWinrate.toFixed(1)}% WR ({totalPredictions} picks)</Chip>
-        <span className="ml-auto hidden font-mono text-[10px] uppercase tracking-[0.18em] text-[#3d4c63] md:block">
-          ratings rise &amp; fall on graded slips · losers rewrite their own playbooks
+        <Chip tone="slate">card record {totalW}W – {totalL}L</Chip>
+        <Chip tone="cyan">{globalWinrate.toFixed(1)}% WR ({totalPredictions} picks, v5 engine)</Chip>
+        <span className="ml-auto hidden max-w-md text-right font-mono text-[10px] uppercase tracking-[0.14em] text-[#3d4c63] md:block">
+          ratings move only on picks an agent backed · cold markets are throttled by statistics, not by rewriting prompts
         </span>
       </div>
 
@@ -215,7 +217,7 @@ function AgentCard({ agent, reload, isAdmin }: { agent: AgentC; reload: () => vo
                   await vaultFetch("/api/agents", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: agent.agentKey || agent.id }) });
                   reload();
                 }} className="clip-tag flex items-center gap-1.5 border border-[#ff3d81]/35 bg-[#ff3d81]/10 px-3 py-1.5 font-mono text-[10px] font-bold uppercase tracking-[0.16em] text-[#ff3d81] hover:brightness-125 ml-2">
-                  <Wrench className="h-3 w-3" /> force improve
+                  <Wrench className="h-3 w-3" /> reset to built-in playbook
                 </button>}
               </>
             )}
@@ -227,7 +229,7 @@ function AgentCard({ agent, reload, isAdmin }: { agent: AgentC; reload: () => vo
       {agent.improvements.length > 0 && (
         <div className="mt-3 border-t border-white/6 pt-2.5">
           <div className="mb-1.5 flex items-center gap-1.5 font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-[#ffb020]">
-            <GitCommitVertical className="h-3.5 w-3.5" /> self-correction
+            <GitCommitVertical className="h-3.5 w-3.5" /> playbook log
           </div>
           <div className="space-y-1.5">
             {agent.improvements.slice(-1).map((imp, i) => (

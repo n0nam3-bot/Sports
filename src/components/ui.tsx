@@ -50,6 +50,47 @@ export function ConfBar({ value }: { value: number }) {
   );
 }
 
+/** Win-probability bar for v5 picks (the value is a percentage, not a legacy score). */
+export function ProbBar({ value }: { value: number }) {
+  const segs = 10;
+  const lit = Math.round(((Math.max(45, Math.min(75, value)) - 45) / 30) * segs);
+  const hot = value >= 62;
+  const warm = value >= 55;
+  const color = hot ? "#37ff8b" : warm ? "#39d5ff" : "#5b7290";
+  return (
+    <div className="flex h-2 items-stretch gap-[3px]" title={`estimated win probability ${value.toFixed(1)}%`}>
+      {Array.from({ length: segs }, (_, i) => (
+        <span
+          key={i}
+          className="conf-seg w-[10px]"
+          style={{
+            background: i < lit ? color : "rgba(120,150,200,0.14)",
+            boxShadow: i < lit && hot ? `0 0 6px ${color}66` : undefined,
+          }}
+        />
+      ))}
+      <span className="ml-1.5 font-mono text-[11px] font-bold" style={{ color }}>{value.toFixed(0)}%</span>
+    </div>
+  );
+}
+
+/** American odds as a signed string. */
+export function fmtOdds(o: number): string {
+  return o > 0 ? `+${o}` : String(o);
+}
+
+/**
+ * Is the price a real sportsbook number, or our own? Model-priced picks must be
+ * checked against the person's book before betting, so this is always visible.
+ */
+export function PriceChip({ source }: { source?: string }) {
+  return source === "model" ? (
+    <Chip tone="amber" className="!tracking-[0.1em]">MODEL PRICE</Chip>
+  ) : (
+    <Chip tone="cyan" className="!tracking-[0.1em]">BOOK PRICE</Chip>
+  );
+}
+
 export function TeamMark({ src, abbr, size = 40 }: { src: string; abbr: string; size?: number }) {
   return (
     <span
@@ -130,8 +171,14 @@ const CATEGORY_META: Record<string, { label: string; tone: string }> = {
   f5_total: { label: "F5 INNINGS", tone: "amber" },
   nrfi: { label: "NRFI / YRFI", tone: "magenta" },
   fight_ml: { label: "FIGHT WINNER", tone: "green" },
-  fight_method: { label: "METHOD", tone: "magenta" },
-  fight_rounds: { label: "ROUND TOTAL", tone: "violet" },
+  fight_method: { label: "FINISH / DECISION", tone: "magenta" },
+  fight_rounds: { label: "TOTAL ROUNDS", tone: "violet" },
+  fight_distance: { label: "GOES DISTANCE", tone: "violet" },
+  fight_start_round: { label: "STARTS ROUND", tone: "violet" },
+  fight_spread: { label: "FINISH SPREAD", tone: "cyan" },
+  fight_method_win: { label: "METHOD", tone: "magenta" },
+  fight_sigstr: { label: "SIG STRIKES", tone: "amber" },
+  fight_td: { label: "TAKEDOWNS", tone: "amber" },
 };
 
 export function CategoryChip({ category }: { category: string }) {

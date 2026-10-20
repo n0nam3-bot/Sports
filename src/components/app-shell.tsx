@@ -2,15 +2,16 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Crosshair, Hexagon, Layers, Users, ScrollText, Zap, Radio, Cpu, KeyRound,
+  Crosshair, Hexagon, Layers, Users, ScrollText, Zap, Radio, Cpu, KeyRound, Wallet,
 } from "lucide-react";
-import type { AgentC, RunC, SlateResp } from "./types";
+import type { AgentC, BetC, BetResult, BetSummaryC, Discipline, RunC, SlateResp } from "./types";
 import { cx } from "./ui";
 import KeysModal from "./keys-modal";
 import {
   loadLlmMode,
   loadVault,
   saveLlmMode,
+  ownerFetch,
   vaultActive,
   vaultFetch,
   EMPTY_VAULT,
@@ -20,6 +21,8 @@ import {
 import WarRoom from "./war-room";
 import AgentsView from "./agents-view";
 import RunsView from "./runs-view";
+import { MyBetsView } from "./my-bets-view";
+import type { BetSavePayload } from "./bet-control";
 import { RELEASE_LABEL } from "@/lib/release";
 
 const ALL_SPORTS = [
@@ -32,17 +35,16 @@ const ALL_SPORTS = [
   { id: "ufc", label: "UFC" },
   { id: "dwcs", label: "DWCS" },
   { id: "pfl", label: "PFL" },
-  // No free feed publishes bout-level boxing data (ESPN returns
-  // "Invalid sport (boxing)"), so it is shown as unavailable rather than faked.
-  { id: "boxing", label: "BOXING", unavailable: true },
 ];
+
+const DISCIPLINE_KEY = "neonslip.discipline.v1";
 
 function etToday(): string {
   return new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
 }
 
 export default function AppShell() {
-  const [tab, setTab] = useState<"war" | "agents" | "ledger">("war");
+  const [tab, setTab] = useState<"war" | "agents" | "ledger" | "bets">("war");
   const [date, setDate] = useState(etToday());
   const [sports, setSports] = useState<string[]>(["nba"]);
   const [slate, setSlate] = useState<SlateResp | null>(null);
@@ -61,6 +63,12 @@ export default function AppShell() {
   const [markets, setMarkets] = useState<string[]>([]);
   const [llmMode, setLlmMode] = useState<LlmMode>("off");
   const [excludedEvents, setExcludedEvents] = useState<string[]>([]);
+  const [discipline, setDisciplineState] = useState<Discipline>("standard");
+  const [bets, setBets] = useState<BetC[]>([]);
+  const [betSummary, setBetSummary] = useState<BetSummaryC | null>(null);
+  const [betsLoading, setBetsLoading] = useState(true);
+  const [betsError, setBetsError] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
   const activeIdRef = useRef<number | null>(null);
   activeIdRef.current = activeId;
 
@@ -68,6 +76,21 @@ export default function AppShell() {
   useEffect(() => {
     setVault(loadVault());
     setLlmMode(loadLlmMode());
+    try {
+      const d = window.localStorage.getItem(DISCIPLINE_KEY);
+      if (d === "strict" || d === "standard" || d === "loose") setDisciplineState(d);
+    } catch {
+      /* storage unavailable */
+    }
+  }, []);
+
+  const setDiscipline = useCallback((d: Discipline) => {
+    setDisciplineState(d);
+    try {
+      window.localStorage.setItem(DISCIPLINE_KEY, d);
+    } catch {
+      /* storage unavailable */
+    }
   }, []);
 
   // live ET clock
@@ -128,8 +151,79 @@ export default function AppShell() {
     setIsAdmin(!!data.isAdmin);
   }, [vault, llmMode]);
 
+  // ---- personal bet tracker ----
+  const loadBets = useCallback(async () => {
+    try {
+      const res = await ownerFetch("/api/bets");
+      const data = await res.json();
+      if (!res.ok) {
+        setBetsError(data.error ?? "could not load your bets");
+        return;
+      }
+      setBets(data.bets ?? []);
+      setBetSummary(data.summary ?? null);
+      setBetsError(null);
+    } catch {
+      setBetsError("could not reach the server to load your bets");
+    } finally {
+      setBetsLoading(false);
+    }
+  }, []);
+
+  const saveBet = useCallback(
+    async (p: BetSavePayload): Promise<string | null> => {
+      try {
+        const res = await ownerFetch("/api/bets", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(p),
+        });
+        const data = await res.json();
+        if (!res.ok) return data.error ?? "could not save the bet";
+        await loadBets();
+        flash("bet tracked — it will settle automatically when the result is graded");
+        return null;
+      } catch {
+        return "network error — try again";
+      }
+    },
+    [loadBets, flash],
+  );
+
+  const removeBet = useCallback(
+    async (predictionId: number): Promise<void> => {
+      try {
+        await ownerFetch(`/api/bets?predictionId=${predictionId}`, { method: "DELETE" });
+      } finally {
+        await loadBets();
+      }
+    },
+    [loadBets],
+  );
+
+  const setBetResult = useCallback(
+    async (predictionId: number, result: Exclude<BetResult, "pending"> | null): Promise<string | null> => {
+      try {
+        const res = await ownerFetch("/api/bets", {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ predictionId, result }),
+        });
+        const data = await res.json();
+        if (!res.ok) return data.error ?? "could not update the bet";
+        await loadBets();
+        return null;
+      } catch {
+        return "network error — try again";
+      }
+    },
+    [loadBets],
+  );
+
+  const betsByPred = useMemo(() => new Map(bets.map((b) => [b.predictionId, b])), [bets]);
+
   useEffect(() => { void loadSlate(); }, [loadSlate]);
-  useEffect(() => { void loadRuns(); void loadAgents(); }, [loadRuns, loadAgents]);
+  useEffect(() => { void loadRuns(); void loadAgents(); void loadBets(); }, [loadRuns, loadAgents, loadBets]);
 
   // poll the active run while the cluster is thinking
   useEffect(() => {
@@ -159,6 +253,7 @@ export default function AppShell() {
             date,
             sports,
             markets,
+            discipline,
             includeEvents:
               slate?.games
                 .filter((g) => g.status === "pre" && !excludedEvents.includes(g.eventId))
@@ -178,22 +273,28 @@ export default function AppShell() {
     } finally {
       setLaunching(false);
     }
-  }, [date, sports, markets, flash, vault, llmMode, slate, excludedEvents]);
+  }, [date, sports, markets, discipline, flash, vault, llmMode, slate, excludedEvents]);
 
   const grade = useCallback(async () => {
-    const res = await vaultFetch("/api/grade", { method: "POST" }, vault, { llmMode });
-    const data = await res.json();
-    if (data.error) flash(`grading fault: ${data.error}`);
-    else if (data.graded === 0) flash("no settled games yet — check back after final whistles");
-    else flash(`graded ${data.graded} predictions — ${data.wins}W · ${data.losses}L · ${data.pushes}P. agent ratings updated.`);
-    void loadRuns(); void loadAgents();
-  }, [flash, loadRuns, loadAgents, vault, llmMode]);
+    setSyncing(true);
+    try {
+      const res = await vaultFetch("/api/grade", { method: "POST" }, vault, { llmMode });
+      const data = await res.json();
+      if (data.error) flash(`grading fault: ${data.error}`);
+      else if (data.graded === 0 && !data.voided) flash("no settled games yet — check back after final whistles");
+      else
+        flash(
+          `graded ${data.graded} predictions — ${data.wins}W · ${data.losses}L · ${data.pushes}P${data.voided ? ` · ${data.voided} voided` : ""}. agent ratings updated.`,
+        );
+      void loadRuns(); void loadAgents(); void loadBets();
+    } catch {
+      flash("grading request dropped — retry");
+    } finally {
+      setSyncing(false);
+    }
+  }, [flash, loadRuns, loadAgents, loadBets, vault, llmMode]);
 
   const toggleSport = (id: string) => {
-    if (ALL_SPORTS.find((s) => s.id === id)?.unavailable) {
-      flash("boxing has no free bout-level data feed — no schedule, records or results to grade. it stays off until a free source exists.");
-      return;
-    }
     setSports((cur) => {
       if (cur.includes(id)) return cur.length === 1 ? cur : cur.filter((s) => s !== id);
       return [...cur, id];
@@ -277,24 +378,28 @@ export default function AppShell() {
         </div>
 
         {/* ---------------- tabs ---------------- */}
-        <div className="mx-auto flex max-w-[1440px] items-center gap-1 px-4 sm:px-6">
+        {/* Scrolls sideways instead of forcing the whole page wider than the screen:
+            on a phone the old row overflowed, so the browser zoomed the page out. */}
+        <div className="mx-auto flex max-w-[1440px] items-center gap-1 overflow-x-auto px-2 [scrollbar-width:none] sm:px-6 [&::-webkit-scrollbar]:hidden">
           {([
-            { id: "war", label: "War Room", icon: Layers, count: slate ? slate.counts.pre : null },
-            { id: "agents", label: "Agent Roster", icon: Users, count: agentsData.length || null },
-            { id: "ledger", label: "Prediction Ledger", icon: ScrollText, count: runsData.filter((r) => r.status === "completed").length || null },
+            { id: "war", label: "War Room", short: "War Room", icon: Layers, count: slate ? slate.counts.pre : null },
+            { id: "agents", label: "Agent Roster", short: "Roster", icon: Users, count: agentsData.length || null },
+            { id: "ledger", label: "Prediction Ledger", short: "Ledger", icon: ScrollText, count: runsData.filter((r) => r.status === "completed").length || null },
+            { id: "bets", label: "My Bets", short: "My Bets", icon: Wallet, count: bets.length || null },
           ] as const).map((t) => (
             <button
               key={t.id}
               onClick={() => setTab(t.id)}
               className={cx(
-                "clip-tag group relative flex items-center gap-2 border-b-2 px-4 py-2.5 font-mono text-[11px] font-bold uppercase tracking-[0.18em] transition-all",
+                "clip-tag group relative flex shrink-0 items-center gap-1.5 whitespace-nowrap border-b-2 px-2.5 py-2.5 font-mono text-[11px] font-bold uppercase tracking-[0.1em] transition-all sm:gap-2 sm:px-4 sm:tracking-[0.18em]",
                 tab === t.id
                   ? "border-[#37ff8b] bg-[#37ff8b]/8 text-[#37ff8b]"
                   : "border-transparent text-[#5f7089] hover:bg-white/4 hover:text-[#d7e3f0]",
               )}
             >
-              <t.icon className="h-3.5 w-3.5" />
-              {t.label}
+              <t.icon className="hidden h-3.5 w-3.5 sm:block" />
+              <span className="sm:hidden">{t.short}</span>
+              <span className="hidden sm:inline">{t.label}</span>
               {t.count != null && (
                 <span className={cx("clip-tag border px-1.5 py-px text-[9px]",
                   tab === t.id ? "border-[#37ff8b]/40 text-[#37ff8b]" : "border-white/15 text-[#5f7089]")}>
@@ -377,10 +482,30 @@ export default function AppShell() {
             launching={launching}
             activeRun={activeRun}
             card={cardForDate}
+            discipline={discipline}
+            setDiscipline={setDiscipline}
+            betsByPred={betsByPred}
+            onSaveBet={saveBet}
+            onRemoveBet={removeBet}
           />
         )}
         {tab === "agents" && <AgentsView agents={agentsData} reload={loadAgents} isAdmin={isAdmin} />}
-        {tab === "ledger" && <RunsView runs={runsData} grade={grade} />}
+        {tab === "ledger" && (
+          <RunsView runs={runsData} grade={grade} syncing={syncing} betsByPred={betsByPred} onSaveBet={saveBet} onRemoveBet={removeBet} />
+        )}
+        {tab === "bets" && (
+          <MyBetsView
+            bets={bets}
+            summary={betSummary}
+            loading={betsLoading}
+            error={betsError}
+            syncing={syncing}
+            onSync={grade}
+            onSave={saveBet}
+            onRemove={removeBet}
+            onResult={setBetResult}
+          />
+        )}
       </main>
 
       <footer className="relative z-10 border-t border-white/6 py-6 text-center font-mono text-[9px] uppercase tracking-[0.24em] text-[#3d4c63]">

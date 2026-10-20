@@ -56,6 +56,21 @@ export function getOwnerId(): string {
   }
 }
 
+/**
+ * Adopt a workspace id from another device so a bet tracker (and everything else
+ * filed under it) follows the person. Same shape rules the server enforces.
+ */
+export function setOwnerId(id: string): boolean {
+  const clean = id.trim();
+  if (!/^[a-zA-Z0-9_-]{8,64}$/.test(clean)) return false;
+  try {
+    window.localStorage.setItem(OWNER_KEY, clean);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function loadVault(): KeyVault {
   if (typeof window === "undefined") return { ...EMPTY_VAULT };
   try {
@@ -131,5 +146,16 @@ export async function vaultFetch(
   if (owner) headers.set("x-neonslip-owner", owner);
   const mode = opts.llmMode ?? loadLlmMode();
   headers.set("x-neonslip-llm", mode);
+  return fetch(input, { ...init, headers });
+}
+
+/**
+ * Like `vaultFetch` but carries ONLY the workspace id. Endpoints that don't use
+ * the user's LLM keys (the bet tracker) have no reason to receive them.
+ */
+export async function ownerFetch(input: string, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers);
+  const owner = getOwnerId();
+  if (owner) headers.set("x-neonslip-owner", owner);
   return fetch(input, { ...init, headers });
 }

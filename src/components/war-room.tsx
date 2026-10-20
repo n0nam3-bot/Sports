@@ -6,9 +6,12 @@ import {
   Gauge, Loader2, Lock, Play, RefreshCw, ShieldAlert, Siren, Sparkles, Ticket,
   TrendingUp, Users2, XOctagon, Repeat, SlidersHorizontal, Shuffle, ToggleLeft, ToggleRight,
 } from "lucide-react";
-import type { GameC, PredC, RunC, SlateResp } from "./types";
-import { CategoryChip, Chip, ConfBar, NeonButton, OutcomeChip, Panel, TeamMark, cx } from "./ui";
-import { MARKET_OPTIONS, optionsForSports } from "@/lib/markets";
+import type { BetC, Discipline, GameC, PredC, RunC, SlateResp } from "./types";
+import { CategoryChip, Chip, ConfBar, NeonButton, OutcomeChip, Panel, PriceChip, ProbBar, TeamMark, cx, fmtOdds } from "./ui";
+import { BetControl, type BetSavePayload } from "./bet-control";
+import { MARKET_OPTIONS, optionsForSports, type MarketOption } from "@/lib/markets";
+import { DISCIPLINES } from "@/lib/discipline";
+import { fairAmerican } from "@/lib/edge";
 
 const LAYER_DOT: Record<string, string> = {
   scout: "#39d5ff",
@@ -38,7 +41,7 @@ export default function WarRoom(props: {
   date: string;
   setDate: (d: string) => void;
   sports: string[];
-  allSports: readonly { id: string; label: string; unavailable?: boolean }[];
+  allSports: readonly { id: string; label: string }[];
   toggleSport: (id: string) => void;
   markets: string[];
   setMarkets: (m: string[]) => void;
@@ -55,6 +58,11 @@ export default function WarRoom(props: {
   launching?: boolean;
   activeRun: RunC | null;
   card: RunC | null;
+  discipline: Discipline;
+  setDiscipline: (d: Discipline) => void;
+  betsByPred: Map<number, BetC>;
+  onSaveBet: (p: BetSavePayload) => Promise<string | null>;
+  onRemoveBet: (predictionId: number) => Promise<void>;
 }) {
   const { slate, activeRun, card } = props;
   const consoleRef = useRef<HTMLDivElement>(null);
@@ -64,9 +72,29 @@ export default function WarRoom(props: {
     if (el) el.scrollTop = el.scrollHeight;
   }, [activeRun?.trace.length]);
 
+  const marketOpts = useMemo(() => optionsForSports(props.sports), [props.sports]);
+  const mmaGroups = useMemo(() => {
+    const groups = new Map<string, MarketOption[]>();
+    for (const o of marketOpts.filter((m) => m.group === "combat")) {
+      const k = o.sub ?? "MMA";
+      groups.set(k, [...(groups.get(k) ?? []), o]);
+    }
+    return [...groups.entries()];
+  }, [marketOpts]);
+  const hasDerived = useMemo(
+    () => props.markets.some((id) => {
+      const o = MARKET_OPTIONS.find((m) => m.id === id);
+      return !!o && o.group !== "combat" && o.group !== "core";
+    }) || props.markets.includes("team_total"),
+    [props.markets],
+  );
+  const toggleMarket = (id: string) =>
+    props.setMarkets(props.markets.includes(id) ? props.markets.filter((x) => x !== id) : [...props.markets, id]);
+
   const showConsole = activeRun != null;
   const predictions = card?.status === "completed" ? card.predictions : [];
   const council = card?.council;
+  const allV5 = predictions.length > 0 && predictions.every((p) => p.modelProb != null);
   const includedCount = useMemo(
     () => slate?.games.filter((g) => g.status === "pre" && !props.excludedEvents.includes(g.eventId)).length ?? 0,
     [slate, props.excludedEvents],
@@ -100,12 +128,9 @@ export default function WarRoom(props: {
                   <button
                     key={s.id}
                     onClick={() => props.toggleSport(s.id)}
-                    title={s.unavailable ? "no free data feed exists for boxing" : undefined}
                     className={cx(
                       "clip-tag border px-3 py-2.5 font-mono text-[11px] font-bold tracking-[0.14em] transition-all",
-                      s.unavailable
-                        ? "cursor-not-allowed border-white/8 bg-white/[0.015] text-[#2f3b4d] line-through"
-                        : on
+                      on
                         ? "border-[#9d7bff]/45 bg-[#9d7bff]/14 text-[#9d7bff] shadow-[0_0_12px_-3px_rgba(157,123,255,0.5)]"
                         : "border-white/10 bg-white/[0.03] text-[#5f7089] hover:border-white/25 hover:text-[#8fa3bd]",
                     )}
@@ -136,37 +161,93 @@ export default function WarRoom(props: {
               >
                 <Shuffle className="h-3.5 w-3.5" /> mixed (default)
               </button>
-              {optionsForSports(props.sports).map((m) => {
-                const on = props.markets.includes(m.id);
+              {marketOpts.filter((m) => m.group !== "combat").map((m) => (
+                <MarketChip key={m.id} m={m} on={props.markets.includes(m.id)} toggle={toggleMarket} />
+              ))}
+            </div>
+            {mmaGroups.length > 0 && (
+              <div className="mt-3 space-y-3 border-t border-white/6 pt-3">
+                <div className="flex items-center gap-2 font-mono text-[9.5px] font-bold uppercase tracking-[0.2em] text-[#ff3d81]">
+                  MMA markets
+                  <span className="normal-case tracking-normal text-[#5f7089]">
+                    {props.sports.filter((x) => ["ufc", "dwcs", "pfl"].includes(x)).map((x) => x.toUpperCase()).join(" / ")} — pick any combination
+                  </span>
+                </div>
+                {mmaGroups.map(([sub, opts]) => {
+                  const allOn = opts.every((o) => props.markets.includes(o.id));
+                  return (
+                    <div key={sub}>
+                      <div className="mb-1.5 flex items-center gap-2 font-mono text-[9px] uppercase tracking-[0.18em] text-[#5f7089]">
+                        {sub}
+                        <button
+                          onClick={() =>
+                            props.setMarkets(
+                              allOn
+                                ? props.markets.filter((id) => !opts.some((o) => o.id === id))
+                                : [...new Set([...props.markets, ...opts.map((o) => o.id)])],
+                            )
+                          }
+                          className="text-[#39d5ff]/80 hover:text-[#39d5ff]"
+                        >
+                          {allOn ? "none" : "all"}
+                        </button>
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {opts.map((m) => (
+                          <MarketChip key={m.id} m={m} on={props.markets.includes(m.id)} toggle={toggleMarket} />
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {props.markets.length > 0 && (
+              <p className="mt-2 font-mono text-[9.5px] uppercase tracking-[0.14em] text-[#ffc966]">
+                focused card — the council only releases the {props.markets.length} selected market
+                {props.markets.length === 1 ? "" : "s"} and passes entirely if none clear the bar
+              </p>
+            )}
+            {hasDerived && (
+              <p className="mt-1.5 max-w-3xl font-mono text-[10px] leading-relaxed tracking-[0.04em] text-[#8fa3bd]">
+                <b className="text-[#ffb020]">Heads-up:</b> the free data feed has no posted line for team totals, halves, quarters or player props, so
+                those picks are <b>model lines</b> — each says the line or price you must beat, and you should check your own book before betting.
+              </p>
+            )}
+          </div>
+
+          {/* discipline: the explicit volume-vs-quality dial */}
+          <div className="w-full">
+            <label className="mb-1.5 flex flex-wrap items-center gap-1.5 font-mono text-[10px] font-bold uppercase tracking-[0.22em] text-[#5f7089]">
+              <Gauge className="h-3.5 w-3.5 text-[#37ff8b]" /> discipline
+              <span className="normal-case tracking-normal text-[#3d4c63]">
+                — fewer picks means a higher bar. passing is a valid result.
+              </span>
+            </label>
+            <div className="flex flex-wrap gap-1.5">
+              {(Object.keys(DISCIPLINES) as Discipline[]).map((d) => {
+                const cfg = DISCIPLINES[d];
+                const on = props.discipline === d;
                 return (
                   <button
-                    key={m.id}
-                    title={m.hint}
-                    onClick={() =>
-                      props.setMarkets(
-                        on
-                          ? props.markets.filter((x) => x !== m.id)
-                          : [...props.markets, m.id],
-                      )
-                    }
+                    key={d}
+                    onClick={() => props.setDiscipline(d)}
+                    aria-pressed={on}
                     className={cx(
-                      "clip-tag border px-3 py-2 font-mono text-[10.5px] font-bold uppercase tracking-[0.12em] transition-all",
+                      "clip-tag border px-3 py-2 text-left font-mono transition-all",
                       on
-                        ? "border-[#ffb020]/50 bg-[#ffb020]/14 text-[#ffb020] shadow-[0_0_12px_-3px_rgba(255,176,32,0.5)]"
+                        ? "border-[#37ff8b]/45 bg-[#37ff8b]/12 text-[#37ff8b] shadow-[0_0_12px_-3px_rgba(55,255,139,0.5)]"
                         : "border-white/10 bg-white/[0.03] text-[#5f7089] hover:border-white/25 hover:text-[#8fa3bd]",
                     )}
                   >
-                    {m.label}
+                    <span className="block text-[10.5px] font-bold uppercase tracking-[0.14em]">{cfg.label}</span>
+                    <span className="block text-[9px] normal-case tracking-normal opacity-80">
+                      {cfg.hint} · up to {cfg.maxPicks} picks · {cfg.dailyCap}u cap
+                    </span>
                   </button>
                 );
               })}
             </div>
-            {props.markets.length > 0 && (
-              <p className="mt-1.5 font-mono text-[9.5px] uppercase tracking-[0.14em] text-[#ffc966]">
-                focused card — the council will only release {props.markets.length} selected market
-                {props.markets.length === 1 ? "" : "s"} and will pass entirely if none carry an edge
-              </p>
-            )}
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5">
@@ -293,9 +374,10 @@ export default function WarRoom(props: {
           <div className="flex flex-wrap items-center gap-3">
             <Ticket className="h-6 w-6 text-[#37ff8b]" />
             <h2 className="font-display text-2xl font-bold uppercase tracking-tight title-stroke">
-              The Slip <span className="text-[#37ff8b]">// top {predictions.length}</span>
+              The Slip <span className="text-[#37ff8b]">{"//"} {predictions.length} play{predictions.length === 1 ? "" : "s"}</span>
             </h2>
             <Chip tone="green"><Flame className="h-3 w-3" /> council approved</Chip>
+            {council.discipline && <Chip tone="slate">{council.discipline} discipline</Chip>}
           </div>
 
           <Panel className="panel-glow p-5">
@@ -308,11 +390,14 @@ export default function WarRoom(props: {
               <div className="flex gap-5 font-mono text-right text-[11px]">
                 <div>
                   <div className="text-[9px] uppercase tracking-[0.2em] text-[#5f7089]">exposure</div>
-                  <div className="text-xl font-bold text-[#37ff8b]">{predictions.reduce((s, p) => s + p.units, 0).toFixed(1)}u</div>
+                  <div className="text-xl font-bold text-[#37ff8b]">{Number(predictions.reduce((s, p) => s + p.units, 0).toFixed(2))}u</div>
                 </div>
                 <div>
-                  <div className="text-[9px] uppercase tracking-[0.2em] text-[#5f7089]">avg conf</div>
-                  <div className="text-xl font-bold text-[#39d5ff]">{(predictions.reduce((s, p) => s + p.confidence, 0) / predictions.length).toFixed(0)}</div>
+                  <div className="text-[9px] uppercase tracking-[0.2em] text-[#5f7089]">{allV5 ? "avg win prob" : "avg conf"}</div>
+                  <div className="text-xl font-bold text-[#39d5ff]">
+                    {(predictions.reduce((s, p) => s + (p.modelProb != null ? p.modelProb * 100 : p.confidence), 0) / predictions.length).toFixed(0)}
+                    {allV5 ? "%" : ""}
+                  </div>
                 </div>
               </div>
             </div>
@@ -335,40 +420,35 @@ export default function WarRoom(props: {
               </div>
             )}
 
-            {!!council.avoided?.length && (
-              <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-white/6 pt-3">
-                <span className="mr-1 flex items-center gap-1 font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-[#ff4757]">
-                  <ShieldAlert className="h-3 w-3" /> faded by council:
-                </span>
-                {council.avoided.slice(0, 6).map((a) => (
-                  <span key={a} className="clip-tag border border-[#ff4757]/20 bg-[#ff4757]/5 px-2 py-0.5 font-mono text-[9.5px] uppercase tracking-wider text-[#ff8296]">{a}</span>
-                ))}
-              </div>
-            )}
+            <Passed items={council.avoided} />
           </Panel>
 
           <div className="grid gap-4 lg:grid-cols-2">
             {predictions.map((p, i) => (
-              <BetCard key={p.id} rank={i + 1} p={p} />
+              <BetCard key={p.id} rank={i + 1} p={p} bet={props.betsByPred.get(p.id)} onSave={props.onSaveBet} onRemove={props.onRemoveBet} />
             ))}
           </div>
         </section>
       )}
 
       {council && predictions.length === 0 && card?.status === "completed" && (
-        <Panel className="rise flex items-start gap-3 p-5">
-          <Ban className="mt-0.5 h-5 w-5 shrink-0 text-[#ffb020]" />
-          <div>
-            <div className="font-display text-lg font-bold">{council.headline}</div>
-            <div className="text-[13px] text-[#8fa3bd]">{council.memo}</div>
-            {props.sports.some((s) => ["ufc", "dwcs", "pfl"].includes(s)) && (
-              <div className="mt-2 text-[12px] leading-relaxed text-[#5f7089]">
-                Prospect cards like DWCS routinely match undefeated fighters against each other, so the
-                model lands near a coin-flip and correctly declines to force a side. Round and method
-                angles are still shown on each bout above.
-              </div>
-            )}
+        <Panel className="rise p-5">
+          <div className="flex items-start gap-3">
+            <Ban className="mt-0.5 h-5 w-5 shrink-0 text-[#ffb020]" />
+            <div className="min-w-0">
+              <div className="font-display text-lg font-bold">{council.headline}</div>
+              <div className="mt-1 text-[13px] leading-relaxed text-[#8fa3bd]">{council.memo}</div>
+              {props.discipline !== "loose" && (
+                <button
+                  onClick={() => props.setDiscipline("loose")}
+                  className="clip-tag mt-3 border border-[#ffb020]/30 bg-[#ffb020]/10 px-3 py-1.5 font-mono text-[10.5px] font-bold uppercase tracking-[0.14em] text-[#ffb020] transition hover:brightness-125"
+                >
+                  lower the bar (loose) and run again
+                </button>
+              )}
+            </div>
           </div>
+          <Passed items={council.avoided} />
         </Panel>
       )}
 
@@ -427,8 +507,23 @@ export default function WarRoom(props: {
 
 /* ================= bet card ================= */
 
-function BetCard({ rank, p }: { rank: number; p: PredC }) {
+function BetCard({
+  rank,
+  p,
+  bet,
+  onSave,
+  onRemove,
+}: {
+  rank: number;
+  p: PredC;
+  bet?: BetC;
+  onSave: (b: BetSavePayload) => Promise<string | null>;
+  onRemove: (predictionId: number) => Promise<void>;
+}) {
   const hot = rank <= 3 && p.outcome === "pending";
+  const v5 = p.modelProb != null;
+  const model = p.priceSource === "model";
+  const fair = v5 ? fairAmerican(p.modelProb!) : null;
   return (
     <Panel className={cx("rise flex flex-col gap-3 p-4", hot && "panel-glow")} >
       <div className="flex items-center gap-3">
@@ -441,8 +536,11 @@ function BetCard({ rank, p }: { rank: number; p: PredC }) {
           {String(rank).padStart(2, "0")}
         </span>
         <div className="min-w-0 flex-1">
-          <CategoryChip category={p.category} />
-          <div className="mt-1 truncate font-display text-[15px] font-bold leading-snug text-[#e8f1fb]">{p.pick}</div>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <CategoryChip category={p.category} />
+            {v5 && <PriceChip source={p.priceSource} />}
+          </div>
+          <div className="mt-1 font-display text-[15px] font-bold leading-snug text-[#e8f1fb]">{p.pick}</div>
         </div>
         <div className="flex flex-col items-end gap-1">
           <OutcomeChip outcome={p.outcome} />
@@ -468,17 +566,34 @@ function BetCard({ rank, p }: { rank: number; p: PredC }) {
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-[10.5px] uppercase tracking-[0.12em] text-[#5f7089]">
         <span className="text-[#d7e3f0]">{p.matchup}</span>
         <span>{etTime(p.startTime)} ET</span>
-        <span className="text-[#ffb020]">odds {p.odds > 0 ? `+${p.odds}` : p.odds}</span>
-        <span className="text-[#37ff8b]">{p.units.toFixed(1)}u stake</span>
+        {model && p.minPrice != null ? (
+          <span className="text-[#ffb020]" title="Model price: your book sets the real number. Don't take a worse price than this.">
+            play at {fmtOdds(p.minPrice)} or better
+          </span>
+        ) : (
+          <span className="text-[#ffb020]">odds {fmtOdds(p.odds)}</span>
+        )}
+        <span className="text-[#37ff8b]">{p.units.toFixed(2).replace(/\.?0+$/, "")}u suggested</span>
       </div>
 
-      <ConfBar value={p.confidence} />
+      {v5 ? (
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5">
+          <ProbBar value={p.modelProb! * 100} />
+          <span className="font-mono text-[10.5px] text-[#8fa3bd]">
+            {p.marketProb != null && <>market {(p.marketProb * 100).toFixed(1)}% · </>}
+            fair {fair != null ? fmtOdds(fair) : "—"}
+            {!model && p.edge ? <> · <b className={p.edge > 0 ? "text-[#37ff8b]" : "text-[#ff4757]"}>EV {p.edge > 0 ? "+" : ""}{p.edge.toFixed(1)}%</b></> : null}
+          </span>
+        </div>
+      ) : (
+        <ConfBar value={p.confidence} />
+      )}
 
       <p className="text-[12px] leading-relaxed text-[#8fa3bd]">{p.reasoning}</p>
 
       <div className="flex flex-wrap items-center gap-1 border-t border-white/6 pt-2.5">
-        <span className="mr-1 font-mono text-[9px] uppercase tracking-[0.2em] text-[#3d4c63]">stamped by</span>
-        {p.agents.slice(0, 7).map((a) => (
+        <span className="mr-1 font-mono text-[9px] uppercase tracking-[0.2em] text-[#3d4c63]">backed by</span>
+        {p.agents.slice(0, 8).map((a) => (
           <span key={a} className="clip-tag border border-white/10 bg-white/[0.04] px-1.5 py-px font-mono text-[8.5px] font-bold uppercase tracking-[0.12em] text-[#8fa3bd]">{a}</span>
         ))}
         {p.finalScore && (
@@ -487,7 +602,51 @@ function BetCard({ rank, p }: { rank: number; p: PredC }) {
           </span>
         )}
       </div>
+
+      <BetControl
+        pick={{ id: p.id, odds: p.odds, units: p.units, outcome: p.outcome, modelProb: p.modelProb, priceSource: p.priceSource, minPrice: p.minPrice }}
+        bet={bet}
+        onSave={onSave}
+        onRemove={onRemove}
+      />
     </Panel>
+  );
+}
+
+/** Near-misses and data gaps: what the council looked at but did not release, and why. */
+function Passed({ items }: { items?: string[] }) {
+  if (!items?.length) return null;
+  return (
+    <div className="mt-3 border-t border-white/6 pt-3">
+      <div className="mb-1.5 flex items-center gap-1 font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-[#ff8296]">
+        <ShieldAlert className="h-3 w-3" /> looked at, not released
+      </div>
+      <ul className="space-y-1">
+        {items.slice(0, 10).map((a) => (
+          <li key={a} className="font-mono text-[10.5px] leading-snug text-[#8fa3bd]">
+            <span className="text-[#ff4757]/70">· </span>{a}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function MarketChip({ m, on, toggle }: { m: MarketOption; on: boolean; toggle: (id: string) => void }) {
+  return (
+    <button
+      title={m.hint}
+      aria-pressed={on}
+      onClick={() => toggle(m.id)}
+      className={cx(
+        "clip-tag border px-3 py-2 font-mono text-[10.5px] font-bold uppercase tracking-[0.12em] transition-all",
+        on
+          ? "border-[#ffb020]/50 bg-[#ffb020]/14 text-[#ffb020] shadow-[0_0_12px_-3px_rgba(255,176,32,0.5)]"
+          : "border-white/10 bg-white/[0.03] text-[#5f7089] hover:border-white/25 hover:text-[#8fa3bd]",
+      )}
+    >
+      {m.label}
+    </button>
   );
 }
 
@@ -562,7 +721,7 @@ function GameCard({
                 {t.record}{away && t.awayRecord ? ` · road ${t.awayRecord}` : ""}{!away && t.homeRecord ? ` · home ${t.homeRecord}` : ""}
               </div>
             </div>
-            {g.combat ? (
+            {g.combat && !(g.combat.priceSource === "espn" && ml != null) ? (
               (() => {
                 const fm = away ? g.combat.model.fairAwayML : g.combat.model.fairHomeML;
                 const pr = away ? g.combat.model.pAway : g.combat.model.pHome;
@@ -613,7 +772,12 @@ function GameCard({
           </div>
           <div className="mt-1.5 flex items-center gap-1 font-mono text-[8.5px] uppercase tracking-[0.14em] text-[#5f7089]">
             <Gauge className="h-3 w-3 text-[#ffb020]" />
-            model prices — no sportsbook publishes MMA lines on the free feed
+            {g.combat.priceSource === "espn"
+              ? "moneyline from ESPN · other markets are model prices"
+              : "model prices — ESPN publishes no MMA lines"}
+            <span className={cx("ml-1 rounded px-1 py-px", g.combat.model.statsUsed ? "text-[#37ff8b]" : "text-[#ff8296]")}>
+              · {g.combat.model.statsUsed ? "career stats" : "records only"}
+            </span>
           </div>
         </>
       ) : (

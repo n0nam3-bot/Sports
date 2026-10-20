@@ -1,13 +1,14 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import {
   ChevronDown, CircleCheck, Filter, Globe, Lock, RefreshCw, ScrollText,
   Star, Target, TrendingUp, Vault,
 } from "lucide-react";
-import type { PredC, RunC } from "./types";
-import { CategoryChip, Chip, OutcomeChip, Panel, cx } from "./ui";
+import type { BetC, PredC, RunC } from "./types";
+import { CategoryChip, Chip, OutcomeChip, Panel, cx, fmtOdds } from "./ui";
 import { vaultFetch, loadLlmMode } from "./keys";
+import { BetControl, type BetSavePayload } from "./bet-control";
 
 function profit(p: PredC): number {
   if (p.outcome === "win") return p.units * (p.odds > 0 ? p.odds / 100 : 100 / -p.odds);
@@ -25,15 +26,36 @@ function StatBlock({ label, value, tone }: { label: string; value: string; tone:
 }
 
 type ViewMode = "all" | "official" | "community";
+type EngineMode = "all" | "v5" | "legacy";
+
+const isV5 = (p: PredC): boolean => (p.engineVersion ?? 4) >= 5;
+const isModelPriced = (p: PredC): boolean => p.priceSource === "model";
 
 const ALL_SPORT_FILTERS = ["nfl", "nba", "mlb", "nhl", "ncaaf", "ncaab", "ufc", "dwcs", "pfl"] as const;
 
-export default function RunsView({ runs, grade }: { runs: RunC[]; grade: () => Promise<void> | void }) {
+export default function RunsView({
+  runs,
+  grade,
+  syncing,
+  betsByPred,
+  onSaveBet,
+  onRemoveBet,
+}: {
+  runs: RunC[];
+  grade: () => Promise<void> | void;
+  syncing: boolean;
+  betsByPred: Map<number, BetC>;
+  onSaveBet: (p: BetSavePayload) => Promise<string | null>;
+  onRemoveBet: (predictionId: number) => Promise<void>;
+}) {
   const [openId, setOpenId] = useState<number | null>(runs[0]?.id ?? null);
-  const [syncing, setSyncing] = useState(false);
   const [publishing, setPublishing] = useState<number | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("all");
+  const [engine, setEngine] = useState<EngineMode>("all");
   const [sportFilter, setSportFilter] = useState<string | null>(null);
+  /** the pick whose bet editor is open (rendered as its own row) */
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const matchesEngine = (p: PredC): boolean => engine === "all" || (engine === "v5" ? isV5(p) : !isV5(p));
 
   async function togglePublic(runId: number, currentlyPublic: boolean) {
     setPublishing(runId);
@@ -54,31 +76,39 @@ export default function RunsView({ runs, grade }: { runs: RunC[]; grade: () => P
     if (viewMode === "official") list = list.filter((r) => r.isViewerRun);
     if (viewMode === "community") list = list.filter((r) => !r.isViewerRun);
     if (sportFilter) list = list.filter((r) => r.sports.includes(sportFilter));
+    if (engine !== "all") {
+      list = list.filter(
+        (r) =>
+          r.predictions.some((p) => (engine === "v5" ? isV5(p) : !isV5(p))) ||
+          // an intentional pass belongs to the new engine
+          (engine === "v5" && r.predictions.length === 0 && r.status === "completed" && !!r.council?.noPlay),
+      );
+    }
     return list;
-  }, [runs, viewMode, sportFilter]);
+  }, [runs, viewMode, sportFilter, engine]);
 
   // ---- stats computation ----
   function computeStats(runList: RunC[]) {
     const seen = new Set<string>();
-    const preds = runList.flatMap((r) => r.predictions);
-    let w = 0, l = 0, push = 0, pnlSum = 0, pendingCount = 0;
+    const preds = runList.flatMap((r) => r.predictions).filter(matchesEngine);
+    let w = 0, l = 0, push = 0, pnlSum = 0, pendingCount = 0, modelPnl = 0, modelN = 0;
     for (const p of preds) {
       // Only count each unique wager once across all runs
       const key = p.dedupeKey || `${p.id}`;
       if (seen.has(key)) continue;
       seen.add(key);
       if (p.outcome === "pending") { pendingCount++; continue; }
-      if (p.outcome === "win") { w++; pnlSum += p.units * (p.odds > 0 ? p.odds / 100 : 100 / -p.odds); }
-      else if (p.outcome === "loss") { l++; pnlSum -= p.units; }
+      if (p.outcome === "win") { w++; const g = profit(p); pnlSum += g; if (isModelPriced(p)) { modelPnl += g; modelN++; } }
+      else if (p.outcome === "loss") { l++; pnlSum -= p.units; if (isModelPriced(p)) { modelPnl -= p.units; modelN++; } }
       else if (p.outcome === "push") { push++; }
     }
     const d = w + l;
-    return { wins: w, losses: l, strike: d ? (w / d) * 100 : null, pnl: pnlSum, pending: pendingCount, total: seen.size };
+    return { wins: w, losses: l, strike: d ? (w / d) * 100 : null, pnl: pnlSum, pending: pendingCount, total: seen.size, modelPnl, modelN };
   }
 
-  const officialStats = useMemo(() => computeStats(runs.filter((r) => r.isViewerRun)), [runs]);
-  const communityStats = useMemo(() => computeStats(runs.filter((r) => !r.isViewerRun)), [runs]);
-  const filteredStats = useMemo(() => computeStats(filtered), [filtered]);
+  const officialStats = useMemo(() => computeStats(runs.filter((r) => r.isViewerRun)), [runs, engine]); // eslint-disable-line react-hooks/exhaustive-deps
+  const communityStats = useMemo(() => computeStats(runs.filter((r) => !r.isViewerRun)), [runs, engine]); // eslint-disable-line react-hooks/exhaustive-deps
+  const filteredStats = useMemo(() => computeStats(filtered), [filtered, engine]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Map of dedupeKey -> first run that staked it
   const firstStakes = useMemo(() => {
@@ -112,7 +142,7 @@ export default function RunsView({ runs, grade }: { runs: RunC[]; grade: () => P
     return ALL_SPORT_FILTERS.filter((s) => set.has(s));
   }, [runs]);
 
-  async function sync() { setSyncing(true); await grade(); setSyncing(false); }
+  async function sync() { await grade(); }
 
   const st = filteredStats;
 
@@ -185,6 +215,27 @@ export default function RunsView({ runs, grade }: { runs: RunC[]; grade: () => P
         ))}
       </div>
 
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-[#5f7089]">engine</span>
+        {([
+          ["all", "all results", "Every pick ever released"],
+          ["v5", "new engine (v5)", "Market-anchored engine: win-probability + EV picks, MMA joint model, no forced card"],
+          ["legacy", "legacy (v4)", "Results from before the rewrite"],
+        ] as const).map(([id, label, hint]) => (
+          <button
+            key={id}
+            title={hint}
+            onClick={() => setEngine(id)}
+            className={cx(
+              "clip-tag border px-2.5 py-1.5 font-mono text-[9px] font-bold uppercase tracking-[0.12em] transition-all",
+              engine === id ? "border-[#37ff8b]/45 bg-[#37ff8b]/14 text-[#37ff8b]" : "border-white/10 bg-white/[0.03] text-[#5f7089] hover:border-white/25",
+            )}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
       {/* ============ Stats Strip ============ */}
       <div className="flex flex-wrap gap-2">
         <StatBlock
@@ -197,7 +248,10 @@ export default function RunsView({ runs, grade }: { runs: RunC[]; grade: () => P
           value={st.strike != null ? `${st.strike.toFixed(1)}%` : "—"}
           tone={st.strike != null && st.strike >= 52.4 ? "text-[#37ff8b]" : "text-[#ffb020]"}
         />
-        <StatBlock label="units p/l" value={`${st.pnl >= 0 ? "+" : ""}${st.pnl.toFixed(1)}u`} tone={st.pnl >= 0 ? "text-[#37ff8b]" : "text-[#ff4757]"} />
+        <StatBlock label="units p/l · every pick" value={`${st.pnl >= 0 ? "+" : ""}${st.pnl.toFixed(1)}u`} tone={st.pnl >= 0 ? "text-[#37ff8b]" : "text-[#ff4757]"} />
+        {st.modelN > 0 && (
+          <StatBlock label="of which model-priced" value={`${st.modelPnl >= 0 ? "+" : ""}${st.modelPnl.toFixed(1)}u`} tone="text-[#ffb020]" />
+        )}
         <StatBlock label="pending" value={String(st.pending)} tone="text-[#ffb020]" />
         
         {/* Dynamic breakdown blocks */}
@@ -221,6 +275,12 @@ export default function RunsView({ runs, grade }: { runs: RunC[]; grade: () => P
            </div>
         )}
       </div>
+
+      <p className="font-mono text-[10px] leading-relaxed tracking-[0.04em] text-[#5f7089]">
+        Units P/L here assumes <b className="text-[#8fa3bd]">every</b> pick was bet at its suggested stake and price. Model-priced picks (most MMA
+        markets) use our price floor, so that part is hypothetical — your book sets the real number. What <i>you</i> actually bet, at the price you
+        actually got, lives in <b className="text-[#37ff8b]">My Bets</b>. (The record window is the latest 50 runs.)
+      </p>
 
       {filtered.length === 0 && (
         <Panel className="p-10 text-center font-mono text-[12px] uppercase tracking-[0.2em] text-[#5f7089]">
@@ -272,6 +332,7 @@ export default function RunsView({ runs, grade }: { runs: RunC[]; grade: () => P
                     <span key={s} className={cx("clip-tag border px-1.5 py-px font-mono text-[8.5px] font-bold uppercase tracking-[0.12em]", isAdmin ? "border-[#39d5ff]/25 bg-[#39d5ff]/8 text-[#39d5ff]" : "border-white/10 bg-white/[0.04] text-[#5f7089]")}>{s}</span>
                   ))}
                 </span>
+                {rp.length === 0 && r.status === "completed" && <Chip tone="amber">PASS · no play</Chip>}
                 {rp.length > 0 && (
                   <span className="font-mono text-[11px] font-bold">
                     <span className="text-[#37ff8b]">{rw}W</span>
@@ -295,6 +356,13 @@ export default function RunsView({ runs, grade }: { runs: RunC[]; grade: () => P
                       <div>
                         <div className={cx("font-display text-[14px] font-bold", isAdmin ? "text-[#e8f1fb]" : "text-[#8fa3bd]")}>{r.council.headline}</div>
                         <div className="text-[12px] leading-relaxed text-[#8fa3bd]">{r.council.memo}</div>
+                        {r.council.avoided?.length ? (
+                          <ul className="mt-2 space-y-0.5">
+                            {r.council.avoided.slice(0, 6).map((a) => (
+                              <li key={a} className="font-mono text-[10px] leading-snug text-[#5f7089]">· {a}</li>
+                            ))}
+                          </ul>
+                        ) : null}
                       </div>
                     </div>
                   )}
@@ -309,10 +377,11 @@ export default function RunsView({ runs, grade }: { runs: RunC[]; grade: () => P
                             <th className="pb-2 pr-3">pick</th>
                             <th className="pb-2 pr-3">matchup</th>
                             <th className="pb-2 pr-3 text-right">odds</th>
-                            <th className="pb-2 pr-3 text-right">conf</th>
+                            <th className="pb-2 pr-3 text-right">win%</th>
                             <th className="pb-2 pr-3 text-right">stake</th>
                             <th className="pb-2 pr-3 text-right">result</th>
-                            <th className="pb-2 text-right">final</th>
+                            <th className="pb-2 pr-3 text-right">final</th>
+                            <th className="pb-2 text-right">my bet</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -323,9 +392,10 @@ export default function RunsView({ runs, grade }: { runs: RunC[]; grade: () => P
                             
                             // If an Official run re-selects a pick first ran by Community,
                             // we show it as a duplicate in the Official run too.
+                            const mine = betsByPred.get(p.id);
                             return (
+                              <Fragment key={p.id}>
                               <tr
-                                key={p.id}
                                 className={cx(
                                   "border-t border-white/5",
                                   isDuplicate ? "text-[#5f7089] opacity-50" :
@@ -357,12 +427,47 @@ export default function RunsView({ runs, grade }: { runs: RunC[]; grade: () => P
                                   )}
                                 </td>
                                 <td className={cx("py-2 pr-3", !isAdmin ? "text-[#5f7089]" : "text-[#8fa3bd]")}>{p.matchup}</td>
-                                <td className="py-2 pr-3 text-right text-[#ffb020]">{p.odds > 0 ? `+${p.odds}` : p.odds}</td>
-                                <td className="py-2 pr-3 text-right text-[#39d5ff]">{p.confidence.toFixed(0)}</td>
-                                <td className="py-2 pr-3 text-right">{p.units.toFixed(1)}u</td>
+                                <td className="py-2 pr-3 text-right text-[#ffb020]" title={isModelPriced(p) ? "model price floor — your book sets the real number" : "sportsbook price"}>
+                                  {fmtOdds(p.odds)}
+                                  {isModelPriced(p) && <sup className="ml-0.5 text-[7px] font-bold uppercase text-[#ffb020]/70">model</sup>}
+                                </td>
+                                <td className="py-2 pr-3 text-right text-[#39d5ff]" title={p.modelProb != null ? "estimated win probability" : "legacy confidence score (not a probability)"}>
+                                  {p.modelProb != null ? `${(p.modelProb * 100).toFixed(0)}%` : <span className="text-[#5f7089]">{p.confidence.toFixed(0)}*</span>}
+                                </td>
+                                <td className="py-2 pr-3 text-right">{p.units.toFixed(2).replace(/\.?0+$/, "")}u</td>
                                 <td className="py-2 pr-3 text-right"><OutcomeChip outcome={p.outcome} /></td>
-                                <td className="py-2 text-right text-[#5f7089]">{p.finalScore ?? "—"}</td>
+                                <td className="py-2 pr-3 text-right text-[#5f7089]">{p.finalScore ?? "—"}</td>
+                                <td className="py-2 text-right">
+                                  <button
+                                    onClick={() => setEditingId(editingId === p.id ? null : p.id)}
+                                    className={cx(
+                                      "whitespace-nowrap rounded border px-2 py-1 font-mono text-[10px] font-bold uppercase tracking-[0.1em]",
+                                      mine ? "border-[#37ff8b]/40 bg-[#37ff8b]/10 text-[#37ff8b]" : "border-white/15 text-[#8fa3bd] hover:border-[#37ff8b]/40 hover:text-[#37ff8b]",
+                                    )}
+                                    title={mine ? "edit your tracked bet" : "log that you bet this"}
+                                  >
+                                    {mine ? `✓ ${mine.stake}u` : "+ bet"}
+                                  </button>
+                                </td>
                               </tr>
+                              {editingId === p.id && (
+                                <tr className="border-t border-white/5">
+                                  <td colSpan={10} className="pb-3 pt-1">
+                                    <div className="max-w-xl">
+                                      <BetControl
+                                        compact
+                                        defaultOpen
+                                        pick={{ id: p.id, odds: p.odds, units: p.units, outcome: p.outcome, modelProb: p.modelProb, priceSource: p.priceSource, minPrice: p.minPrice }}
+                                        bet={mine}
+                                        onSave={onSaveBet}
+                                        onRemove={onRemoveBet}
+                                        onDone={() => setEditingId(null)}
+                                      />
+                                    </div>
+                                  </td>
+                                </tr>
+                              )}
+                              </Fragment>
                             );
                           })}
                         </tbody>
@@ -370,7 +475,11 @@ export default function RunsView({ runs, grade }: { runs: RunC[]; grade: () => P
                     </div>
                   ) : (
                     <div className="font-mono text-[11px] uppercase tracking-[0.18em] text-[#5f7089]">
-                      {r.status === "running" ? "cluster still thinking" : "no bets released"}
+                      {r.status === "running"
+                        ? "cluster still thinking"
+                        : r.council?.noPlay
+                          ? "the council passed — nothing cleared the bar. See the near-misses above."
+                          : "no bets released"}
                     </div>
                   )}
 
