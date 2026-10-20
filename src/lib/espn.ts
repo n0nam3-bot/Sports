@@ -86,6 +86,14 @@ export interface GameInfo {
     awayProbables: ProbableInfo[];
     notes: string[];
     lineupPosted: boolean;
+    /**
+     * True only when the per-game report was actually fetched. An empty
+     * `injuries` array is meaningless without this: "no injuries" and "we
+     * never looked" must not be confused, because the market always knows.
+     */
+    injuriesChecked?: boolean;
+    /** ESPN's own matchup-predictor win probability (percent), when published */
+    predictor?: { homeWinPct: number; awayWinPct: number } | null;
   };
   /** combat sports only */
   combat?: {
@@ -93,11 +101,23 @@ export interface GameInfo {
     scheduledRounds: number;
     titleFight: boolean;
     cardSegment: string; // "Main Event" | "Main Card" | "Prelims"
-    /** model-derived fair prices — ESPN publishes no MMA sportsbook lines */
-    model: CombatModel & { statsUsed?: boolean; summary?: string };
+    /** model-derived fair prices (legacy shape; the board renders these) */
+    model: LegacyCombat & {
+      statsUsed?: boolean;
+      summary?: string;
+      pace?: string;
+      cardio?: string;
+    };
+    /** the joint outcome model every MMA market is priced from */
+    dist: MmaModel;
+    promotion: Promotion;
     eventId: string;
     competitionId: string;
     league: string;
+    /** ESPN competitor ids, used to read per-fight stats and to match odds */
+    fighterIds: { away: string | null; home: string | null };
+    /** where the moneyline came from, when ESPN published one */
+    priceSource?: "espn" | null;
   };
 }
 
@@ -116,7 +136,8 @@ export const SPORT_PATHS: Record<string, { label: string; path: string }> = {
 /** Combat sports have no spreads/totals — they get their own market model. */
 export const COMBAT_SPORTS = new Set(["ufc", "dwcs", "pfl"]);
 
-import { combatModel, type CombatModel } from "./combat";
+import { buildMmaModel, legacyFromModel, type LegacyCombat, type MmaModel, type Promotion } from "./mma-model";
+import { classifyFightResult, type FightMethod } from "./grading";
 
 const API = "https://site.api.espn.com/apis/site/v2/sports";
 
@@ -534,6 +555,14 @@ function parseBout(bout: any, card: any, sport: string): GameInfo {
   const cardId = String(card?.id ?? "");
   const boutId = String(bout.id);
   const league = sport === "pfl" ? "pfl" : "ufc";
+  const promotion: Promotion = sport === "dwcs" ? "dwcs" : sport === "pfl" ? "pfl" : "ufc";
+  const dist = buildMmaModel({
+    weightClass: String(weight),
+    scheduledRounds: rounds,
+    promotion,
+    away: { record: a.record, profile: null },
+    home: { record: b.record, profile: null },
+  });
   return {
     eventId: boutId,
     sport,
@@ -561,18 +590,31 @@ function parseBout(bout: any, card: any, sport: string): GameInfo {
       scheduledRounds: rounds,
       titleFight: rounds === 5,
       cardSegment: rounds === 5 ? "Main Card" : "Undercard",
-      model: { ...combatModel(a.record, b.record, String(weight), rounds), statsUsed: false, summary: "" },
+      model: { ...legacyFromModel(dist), statsUsed: false, summary: "" },
+      dist,
+      promotion,
       eventId: cardId,
       competitionId: boutId,
       league,
+      fighterIds: { away: a.id, home: b.id },
+      priceSource: null,
     },
   };
+}
+
+/** ESPN files Dana White's Contender Series under the UFC league. */
+export function isContenderSeries(card: any): boolean {
+  return /contender\s*series|\bdwcs\b/i.test(`${card?.name ?? ""} ${card?.shortName ?? ""}`);
 }
 
 /** Flattens every bout on every card that falls on the requested date. */
 function parseCombatCards(events: any[], sport: string, dateISO: string): GameInfo[] {
   const out: GameInfo[] = [];
   for (const card of events) {
+    // Without this, picking "DWCS" returned every UFC card of the day (and
+    // picking "UFC" included Contender Series prospects priced like UFC).
+    if (sport === "dwcs" && !isContenderSeries(card)) continue;
+    if (sport === "ufc" && isContenderSeries(card)) continue;
     const bouts: any[] = card?.competitions ?? [];
     for (const bout of bouts) {
       const when = String(bout?.date ?? card?.date ?? "");
@@ -660,6 +702,20 @@ async function summary(sport: string, eventId: string): Promise<any | null> {
   return jfetch(`${API}/${meta.path}/summary?event=${eventId}`);
 }
 
+/** ESPN's matchup predictor (BPI/FPI-based win probability) from a summary payload. */
+export function parsePredictor(sum: any): { homeWinPct: number; awayWinPct: number } | null {
+  const p = sum?.predictor;
+  if (!p) return null;
+  const h = Number(p?.homeTeam?.gameProjection);
+  const a = Number(p?.awayTeam?.gameProjection);
+  const okH = Number.isFinite(h) && h > 1 && h < 99;
+  const okA = Number.isFinite(a) && a > 1 && a < 99;
+  if (okH && okA && Math.abs(h + a - 100) <= 3) return { homeWinPct: h, awayWinPct: a };
+  if (okH && !okA) return { homeWinPct: h, awayWinPct: 100 - h };
+  if (okA && !okH) return { homeWinPct: 100 - a, awayWinPct: a };
+  return null;
+}
+
 export function parseInjuries(data: any): InjuryInfo[] {
   const out: InjuryInfo[] = [];
   for (const teamBlock of data?.injuries ?? []) {
@@ -682,7 +738,7 @@ export function parseInjuries(data: any): InjuryInfo[] {
 
 // ---------- slate ----------
 
-async function mapLimit<T, R>(
+export async function mapLimit<T, R>(
   items: T[],
   limit: number,
   fn: (item: T) => Promise<R>,
@@ -784,6 +840,8 @@ export async function getSlateDetailed(
         const sum = await summary(g.sport, g.eventId);
         if (sum) {
           g.injuries = parseInjuries(sum);
+          g.context.injuriesChecked = true;
+          g.context.predictor = parsePredictor(sum);
           if (!g.odds && sum.pickcenter)
             g.odds = parseOdds(sum.pickcenter, g.home.abbr, g.away.abbr, g.sport);
           if (!g.leaders.length && sum.leaders)
@@ -840,6 +898,13 @@ export interface FinalScore {
   elapsedMinutes?: number;
   scheduledRounds?: number;
   wentDistance?: boolean;
+  /** how the fight ended; "unknown" when ESPN did not say */
+  method?: FightMethod;
+  /** ESPN competitor ids + card id so per-fight stats can be fetched */
+  homeId?: string;
+  awayId?: string;
+  cardId?: string;
+  league?: "ufc" | "pfl";
 }
 
 export async function getFinals(
@@ -858,27 +923,46 @@ export async function getFinals(
         const a = fighterInfo(cs[0] ?? {}, 0);
         const b = fighterInfo(cs[1] ?? {}, 1);
         const winnerC = cs.find((c) => c?.winner === true);
+        const winnerInfo = winnerC ? fighterInfo(winnerC, cs.indexOf(winnerC)) : null;
         const rounds = Number(bout?.format?.regulation?.periods ?? 3) || 3;
         const endRound = Number(st?.period ?? 0) || 0;
         // ESPN reports the stoppage time as elapsed within the final round.
         const clk = String(st?.displayClock ?? "0:00");
         const [mm, ss] = clk.split(":").map((n) => Number(n) || 0);
         const elapsed = Math.max(0, (endRound - 1) * 5 + mm + ss / 60);
-        const wentDistance = endRound >= rounds && mm >= 5;
+        const result = st?.result ?? {};
+        const method = classifyFightResult(
+          result?.name,
+          result?.description,
+          result?.displayName,
+          result?.shortDisplayName,
+          type?.detail,
+          type?.description,
+        );
+        // A decision (or a draw) means every scheduled round was fought.
+        const wentDistance =
+          method === "dec" || method === "draw" || (endRound >= rounds && mm >= 5);
         out.push({
           eventId: String(bout.id),
           status: type.state === "in" ? "in" : type.completed ? "post" : "pre",
           homeAbbr: b.abbr,
           awayAbbr: a.abbr,
-          homeScore: winnerC && fighterInfo(winnerC, 1).abbr === b.abbr ? 1 : 0,
-          awayScore: winnerC && fighterInfo(winnerC, 0).abbr === a.abbr ? 1 : 0,
+          // Match winners by athlete id, not by surname: two fighters sharing a
+          // last name (or a "Jr." suffix) used to break win attribution.
+          homeScore: winnerInfo && winnerInfo.id === b.id ? 1 : 0,
+          awayScore: winnerInfo && winnerInfo.id === a.id ? 1 : 0,
           homeLine: [],
           awayLine: [],
-          winnerName: winnerC ? fighterInfo(winnerC, 0).name : undefined,
+          winnerName: winnerInfo?.name,
           endRound,
           elapsedMinutes: Math.round(elapsed * 100) / 100,
           scheduledRounds: rounds,
           wentDistance,
+          method,
+          homeId: b.id,
+          awayId: a.id,
+          cardId: String(card?.id ?? ""),
+          league: sport === "pfl" ? "pfl" : "ufc",
         });
       }
     }

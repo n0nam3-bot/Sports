@@ -4,27 +4,36 @@
  * Reach and stance are also fetched for the style-matchup model.
  * This is a distinct API host (sports.core.api.espn.com) that carries
  * much richer data than the public scoreboard endpoint.
+ *
+ * The same host also publishes per-fight statistics (significant strikes,
+ * takedowns) and — when ESPN has them — pre-fight moneylines, which we use
+ * for grading the volume props and for real prices respectively.
  */
+
+import { buildMmaModel, legacyFromModel, type LegacyCombat, type MmaModel, type Promotion } from "./mma-model";
 
 const CORE = "https://sports.core.api.espn.com/v2/sports/mma";
 
 export interface FighterProfile {
+  athleteId: string;
   displayName: string;
-  reach: number | null;     // inches
-  height: number | null;    // inches
-  stance: string;           // "Orthodox" | "Southpaw" | "Switch" | "Unknown"
+  /** false when ESPN returned no career statistics for this fighter */
+  hasStats: boolean;
+  reach: number | null; // inches
+  height: number | null; // inches
+  stance: string; // "Orthodox" | "Southpaw" | "Switch" | "Unknown"
   // career per-minute & percentage stats
-  strikeLPM: number;        // significant strikes landed per minute
-  strikeAccuracy: number;   // 0-100
-  strikeDefense: number;    // 0-100 (absorbed / attempted against)
-  takedownAvg: number;      // per 15 min
+  strikeLPM: number; // significant strikes landed per minute
+  strikeAccuracy: number; // 0-100
+  strikeDefense: number; // 0-100 (absorbed / attempted against)
+  takedownAvg: number; // per 15 min
   takedownAccuracy: number; // 0-100
-  takedownDefense: number;  // 0-100
-  submissionAvg: number;    // per 15 min
-  koTkoPct: number;         // KO + TKO finish %
-  decisionPct: number;      // decision win %
+  takedownDefense: number; // 0-100
+  submissionAvg: number; // per 15 min
+  koTkoPct: number; // KO + TKO finish %
+  decisionPct: number; // decision win %
   // derived finish tendency
-  finishRate: number;       // probability fight ends inside distance (0-1)
+  finishRate: number; // probability fight ends inside distance (0-1)
 }
 
 async function jfetch(url: string, timeoutMs = 6000): Promise<any | null> {
@@ -44,6 +53,9 @@ async function jfetch(url: string, timeoutMs = 6000): Promise<any | null> {
   }
 }
 
+/** ESPN `$ref` links sometimes point at an internal `.pvt` host. */
+const publicRef = (ref: string): string => ref.replace("sports.core.api.espn.pvt", "sports.core.api.espn.com");
+
 function readStats(categories: any[]): Record<string, number> {
   const out: Record<string, number> = {};
   for (const cat of categories) {
@@ -59,12 +71,18 @@ function readStats(categories: any[]): Record<string, number> {
 /** Fetch a fighter profile given their ESPN athlete ID. */
 export async function fetchFighterProfile(
   athleteId: string,
+  league: "ufc" | "pfl" = "ufc",
 ): Promise<FighterProfile | null> {
-  const [ath, statsData] = await Promise.all([
+  const [ath, primary] = await Promise.all([
     jfetch(`${CORE}/athletes/${athleteId}?lang=en&region=us`),
     jfetch(`${CORE}/athletes/${athleteId}/statistics?lang=en&region=us`),
   ]);
   if (!ath) return null;
+  // Some deployments only serve career stats from the league-scoped path.
+  const statsData =
+    primary?.splits?.categories?.length
+      ? primary
+      : await jfetch(`${CORE}/leagues/${league}/athletes/${athleteId}/statistics?lang=en&region=us`);
 
   const stance =
     typeof ath.stance === "string"
@@ -73,6 +91,7 @@ export async function fetchFighterProfile(
 
   const cats: any[] = statsData?.splits?.categories ?? [];
   const s = readStats(cats);
+  const hasStats = s["strikeLPM"] !== undefined || s["takedownAvg"] !== undefined;
 
   const koTkoPct = (s["koPercentage"] ?? 0) + (s["tkoPercentage"] ?? 0);
   const decPct = s["decisionPercentage"] ?? 33;
@@ -81,17 +100,22 @@ export async function fetchFighterProfile(
   // so a 22% decision rate means ~78% of wins ended by finish — but total
   // fights includes losses, so we need to be conservative.
   // Use: finishRate ≈ 1 - min(decPct/50, 0.80) — caps so pure decisions aren't 100%
-  const impliedFinish = 1 - Math.min(decPct / 50, 0.80);
+  const impliedFinish = 1 - Math.min(decPct / 50, 0.8);
   const explicitFinish = koTkoPct / 100 + (s["submissionAvg"] ?? 0) * 0.25;
-  // Blend: use explicit when we have KO/sub data, fallback to implied from dec%
-  const finishRate = Math.min(0.82, Math.max(0.18,
-    koTkoPct > 0 || (s["submissionAvg"] ?? 0) > 0.5
-      ? Math.max(impliedFinish, explicitFinish)
-      : impliedFinish,
-  ));
+  const finishRate = Math.min(
+    0.82,
+    Math.max(
+      0.18,
+      koTkoPct > 0 || (s["submissionAvg"] ?? 0) > 0.5
+        ? Math.max(impliedFinish, explicitFinish)
+        : impliedFinish,
+    ),
+  );
 
   return {
+    athleteId,
     displayName: ath.displayName ?? ath.fullName ?? "Unknown",
+    hasStats,
     reach: typeof ath.reach === "number" ? ath.reach : null,
     height: typeof ath.height === "number" ? ath.height : null,
     stance,
@@ -108,6 +132,22 @@ export async function fetchFighterProfile(
   };
 }
 
+export interface BoutProfiles {
+  away: FighterProfile | null;
+  home: FighterProfile | null;
+  /** ESPN competitor ids (== athlete ids in MMA); used to read per-fight stats */
+  ids: { away: string | null; home: string | null };
+}
+
+async function competitorAthleteId(ref: string | undefined): Promise<{ competitorId: string | null; athleteId: string | null }> {
+  if (!ref) return { competitorId: null, athleteId: null };
+  const competitorId = ref.match(/competitors\/(\d+)/)?.[1] ?? null;
+  const comp = await jfetch(publicRef(ref));
+  const athRef: string | undefined = comp?.athlete?.$ref;
+  const athleteId = athRef?.match(/athletes\/(\d+)/)?.[1] ?? competitorId;
+  return { competitorId, athleteId };
+}
+
 /**
  * Pull both fighters' profiles from the competitor list in an upcoming bout.
  * ESPN nests athlete IDs inside the competition's competitor refs.
@@ -116,61 +156,215 @@ export async function fetchBoutProfiles(
   eventId: string,
   competitionId: string,
   league: "ufc" | "pfl",
-): Promise<{ away: FighterProfile | null; home: FighterProfile | null }> {
+): Promise<BoutProfiles> {
+  const empty: BoutProfiles = { away: null, home: null, ids: { away: null, home: null } };
   const base = `${CORE}/leagues/${league}/events/${eventId}/competitions/${competitionId}/competitors`;
   const compList = await jfetch(`${base}?lang=en&region=us`);
-  if (!compList?.items?.length) return { away: null, home: null };
+  if (!compList?.items?.length) return empty;
 
-  const profiles: (FighterProfile | null)[] = [];
-  for (const item of compList.items.slice(0, 2)) {
-    const ref: string | undefined = typeof item === "string" ? item : item?.$ref;
-    if (!ref) { profiles.push(null); continue; }
-    const comp = await jfetch(ref);
-    const athRef: string | undefined = comp?.athlete?.$ref;
-    if (!athRef) { profiles.push(null); continue; }
-    const athId = athRef.match(/athletes\/(\d+)/)?.[1];
-    if (!athId) { profiles.push(null); continue; }
-    profiles.push(await fetchFighterProfile(athId));
+  const refs: (string | undefined)[] = compList.items
+    .slice(0, 2)
+    .map((item: any) => (typeof item === "string" ? item : item?.$ref));
+
+  const both = await Promise.all(
+    refs.map(async (ref) => {
+      const { competitorId, athleteId } = await competitorAthleteId(ref);
+      const profile = athleteId ? await fetchFighterProfile(athleteId, league) : null;
+      return { competitorId: competitorId ?? athleteId, profile };
+    }),
+  );
+
+  return {
+    away: both[0]?.profile ?? null,
+    home: both[1]?.profile ?? null,
+    ids: { away: both[0]?.competitorId ?? null, home: both[1]?.competitorId ?? null },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// optional real moneylines (ESPN publishes these for some cards)
+// ---------------------------------------------------------------------------
+
+function americanFrom(v: unknown): number | null {
+  if (typeof v === "number" && Number.isInteger(v) && Math.abs(v) >= 100) return v;
+  if (typeof v === "string") {
+    const s = v.trim().toUpperCase();
+    if (s === "EVEN" || s === "EV") return 100;
+    const n = parseInt(s.replace(/[^\d+-]/g, ""), 10);
+    if (Number.isInteger(n) && Math.abs(n) >= 100) return n;
   }
+  return null;
+}
 
-  return { away: profiles[0] ?? null, home: profiles[1] ?? null };
+function moneylineOf(node: any): number | null {
+  if (!node || typeof node !== "object") return null;
+  return (
+    americanFrom(node.moneyLine) ??
+    americanFrom(node.moneyline) ??
+    americanFrom(node.current?.moneyLine) ??
+    americanFrom(node.close?.moneyLine) ??
+    americanFrom(node.open?.moneyLine) ??
+    americanFrom(node.odds) ??
+    americanFrom(node.current?.odds) ??
+    americanFrom(node.close?.odds) ??
+    null
+  );
 }
 
 /**
- * Enhanced combat model using real ESPN stats.
- * Falls back to record-only model when stats are unavailable.
+ * Parse an ESPN core `odds` payload into per-fighter moneylines.
+ *
+ * Safety first: a moneyline is only accepted when BOTH fighters are matched
+ * to an entry by their athlete id. Mapping by position could silently swap the
+ * two prices, so if any entry can't be identified we return null and the
+ * engine keeps using its own model price instead.
  */
-export interface EnhancedCombatModel {
+export function parseMmaMoneylines(
+  payload: any,
+  awayId: string | null,
+  homeId: string | null,
+): { away: number; home: number } | null {
+  if (!awayId || !homeId || awayId === homeId) return null;
+  const items: any[] = Array.isArray(payload?.items) ? payload.items : Array.isArray(payload) ? payload : [];
+  for (const item of items) {
+    const found = new Map<string, number>();
+    const nodes: any[] = [
+      item?.awayAthleteOdds,
+      item?.homeAthleteOdds,
+      item?.awayTeamOdds,
+      item?.homeTeamOdds,
+      ...(Array.isArray(item?.competitors) ? item.competitors : []),
+    ].filter(Boolean);
+    for (const node of nodes) {
+      const ref: string | undefined = node?.athlete?.$ref ?? node?.team?.$ref ?? node?.competitor?.$ref;
+      const id = ref?.match(/(?:athletes|competitors)\/(\d+)/)?.[1] ?? (node?.athlete?.id ? String(node.athlete.id) : undefined);
+      const ml = moneylineOf(node);
+      if (id && ml != null) found.set(id, ml);
+    }
+    const a = found.get(awayId);
+    const h = found.get(homeId);
+    if (a == null || h == null) continue;
+    // sanity: two sides of one fight price to ~100-115% combined
+    const imp = (x: number) => (x < 0 ? -x / (-x + 100) : 100 / (x + 100));
+    const total = imp(a) + imp(h);
+    if (total < 0.98 || total > 1.2) continue;
+    return { away: a, home: h };
+  }
+  return null;
+}
+
+export async function fetchBoutMoneylines(
+  league: "ufc" | "pfl",
+  eventId: string,
+  competitionId: string,
+  awayId: string | null,
+  homeId: string | null,
+): Promise<{ away: number; home: number } | null> {
+  const data = await jfetch(
+    `${CORE}/leagues/${league}/events/${eventId}/competitions/${competitionId}/odds?lang=en&region=us`,
+    5000,
+  );
+  return parseMmaMoneylines(data, awayId, homeId);
+}
+
+// ---------------------------------------------------------------------------
+// post-fight statistics (used to grade significant strikes / takedown props)
+// ---------------------------------------------------------------------------
+
+export interface FightStatLine {
+  sigStrikesLanded: number | null;
+  takedownsLanded: number | null;
+}
+
+interface RawStat {
+  key: string;
+  value: number;
+}
+
+const compact = (s: unknown): string =>
+  String(s ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+
+/** Walk any JSON shape and collect named numeric statistics. */
+function collectStats(node: any, out: RawStat[], depth = 0): void {
+  if (!node || typeof node !== "object" || depth > 7) return;
+  if (Array.isArray(node)) {
+    for (const x of node) collectStats(x, out, depth + 1);
+    return;
+  }
+  const name = node.name ?? node.displayName ?? node.abbreviation;
+  if (typeof name === "string") {
+    let value: number | null = null;
+    if (typeof node.value === "number") value = node.value;
+    else if (typeof node.value === "string" && node.value.trim() !== "" && Number.isFinite(Number(node.value))) value = Number(node.value);
+    else if (typeof node.displayValue === "string") {
+      const m = node.displayValue.match(/^\s*(\d+(?:\.\d+)?)/);
+      if (m) value = Number(m[1]);
+    }
+    if (value != null) {
+      // One entry per identifier. ESPN stats usually carry several (name AND
+      // displayName AND abbreviation); joining them into one key would break
+      // every exact match.
+      for (const id of [node.name, node.displayName, node.abbreviation]) {
+        const key = compact(id);
+        if (key) out.push({ key, value });
+      }
+    }
+  }
+  for (const v of Object.values(node)) collectStats(v, out, depth + 1);
+}
+
+const SIG_NAMES = new Set(["sigstrikeslanded", "significantstrikeslanded", "sigstrikes", "significantstrikes", "sigstrikesmade"]);
+const TD_NAMES = new Set(["takedownslanded", "takedowns", "takedownscompleted", "takedownssuccessful", "takedownsmade"]);
+const NOT_A_COUNT = ["attempt", "pct", "percent", "accuracy", "def", "absorb", "avg", "per", "rate", "head", "body", "leg", "distance", "clinch", "ground"];
+
+function pickCount(stats: RawStat[], names: Set<string>, loose: RegExp): number | null {
+  const ok = stats.filter((s) => !NOT_A_COUNT.some((bad) => s.key.includes(bad)));
+  // exact names win over looser matches
+  for (const s of ok) if (names.has(s.key)) return s.value;
+  for (const s of ok) if (loose.test(s.key)) return s.value;
+  return null;
+}
+
+/** Extract the two counts we grade from a core `statistics` payload. */
+export function parseFightStatLine(payload: any): FightStatLine {
+  const stats: RawStat[] = [];
+  collectStats(payload, stats);
+  return {
+    // The exclusion list (attempts, %, targets, defence, per-minute…) has already removed
+    // everything that is not a plain count, so the fallback can be broad.
+    sigStrikesLanded: pickCount(stats, SIG_NAMES, /(sig|significant)strike/),
+    takedownsLanded: pickCount(stats, TD_NAMES, /takedown/),
+  };
+}
+
+export async function fetchFightStatLine(
+  league: "ufc" | "pfl",
+  eventId: string,
+  competitionId: string,
+  competitorId: string,
+): Promise<FightStatLine | null> {
+  const data = await jfetch(
+    `${CORE}/leagues/${league}/events/${eventId}/competitions/${competitionId}/competitors/${competitorId}/statistics?lang=en&region=us`,
+    7000,
+  );
+  if (!data) return null;
+  return parseFightStatLine(data);
+}
+
+// ---------------------------------------------------------------------------
+// enhanced model used by the slate + engine
+// ---------------------------------------------------------------------------
+
+export type EnhancedCombat = LegacyCombat & {
+  statsUsed: boolean;
+  summary: string;
   pace: string;
   cardio: string;
-  pHome: number;
-  pAway: number;
-  fairHomeML: number;
-  fairAwayML: number;
-  pFinish: number;
-  fairFinish: number;
-  fairDecision: number;
-  expRounds: number;
-  roundLine: number;
-  pRoundsOver: number;
-  fairRoundsOver: number;
-  fairRoundsUnder: number;
-  statsUsed: boolean;
-  summary: string; // human-readable matchup summary for agents
-}
-
-function american(p: number): number {
-  const c = Math.min(0.93, Math.max(0.07, p));
-  return c >= 0.5 ? -Math.round((c / (1 - c)) * 100) : Math.round(((1 - c) / c) * 100);
-}
-
-function winPctFromRecord(rec: string): { pct: number; fights: number } {
-  const m = rec.match(/(\d+)\D+(\d+)(?:\D+(\d+))?/);
-  if (!m) return { pct: 0.5, fights: 0 };
-  const w = Number(m[1]); const l = Number(m[2]); const d = Number(m[3] ?? 0);
-  const f = w + l + d;
-  return { pct: f > 0 ? (w + 0.5 * d) / f : 0.5, fights: f };
-}
+  /** the full joint model every MMA market is derived from */
+  dist: MmaModel;
+};
 
 export function buildEnhancedCombatModel(
   awayRecord: string,
@@ -179,121 +373,70 @@ export function buildEnhancedCombatModel(
   scheduledRounds: number,
   awayProfile: FighterProfile | null,
   homeProfile: FighterProfile | null,
-): EnhancedCombatModel {
-  const awayRec = winPctFromRecord(awayRecord);
-  const homeRec = winPctFromRecord(homeRecord);
+  promotion: Promotion = "ufc",
+): EnhancedCombat {
+  const dist = buildMmaModel({
+    weightClass,
+    scheduledRounds,
+    promotion,
+    away: { record: awayRecord, profile: awayProfile },
+    home: { record: homeRecord, profile: homeProfile },
+  });
+  const legacy = legacyFromModel(dist);
+  const rounds = dist.rounds;
+  const have = !!(awayProfile?.hasStats && homeProfile?.hasStats);
 
-  let pHome: number;
-  let pFinish: number;
-  let summaryLines: string[] = [];
-  const statsUsed = !!(awayProfile && homeProfile);
+  let pace = "Unknown pace";
+  let cardio = "See summary";
+  const lines: string[] = [];
 
-  const heavy = /heavy|light heavy|middle/i.test(weightClass);
-  const light = /straw|fly|bantam|feather/i.test(weightClass);
-
-  if (statsUsed && awayProfile && homeProfile) {
-    // ---- Striking edge ----
-    // If A's strike rate × accuracy > B's defense, A has a striking advantage.
-    const aStrk = (awayProfile.strikeLPM * awayProfile.strikeAccuracy) / 100;
-    const hStrk = (homeProfile.strikeLPM * homeProfile.strikeAccuracy) / 100;
-    const strkEdge = (aStrk - hStrk) / Math.max(1, aStrk + hStrk); // normalised -1..+1
-
-    // ---- Grappling edge ----
-    const aTD  = awayProfile.takedownAvg * (awayProfile.takedownAccuracy / 100);
-    const hTD  = homeProfile.takedownAvg * (homeProfile.takedownAccuracy / 100);
-    const tdEdge = (aTD - hTD) / Math.max(0.5, aTD + hTD);
-
-    // ---- Record momentum ----
-    const recDiff = awayRec.pct - homeRec.pct;
-
-    // Composite win probability for away fighter. Weights: record 35%, striking 35%, TD 20%, exp 10%
-    const expEdge = (awayRec.fights - homeRec.fights) * 0.004;
-    const rawPAway = 0.5 + recDiff * 0.35 + strkEdge * 0.35 + tdEdge * 0.20 + expEdge;
-    const pAway = Math.min(0.88, Math.max(0.12, rawPAway));
-    pHome = 1 - pAway;
-
-    // ---- Finish probability ----
-    const avgFinish = (awayProfile.finishRate + homeProfile.finishRate) / 2;
-    pFinish = Math.min(0.82, Math.max(0.18,
-      avgFinish
-        + (heavy ? 0.08 : 0)
-        - (light ? 0.06 : 0)
-        - (scheduledRounds === 5 ? 0.05 : 0),
-    ));
-
-    // ---- Style summary ----
-    const stanceNote = awayProfile.stance === homeProfile.stance
-      ? `both ${awayProfile.stance.toLowerCase()}`
-      : `${awayProfile.stance.toLowerCase()} vs ${homeProfile.stance.toLowerCase()}`;
-    const reachNote = awayProfile.reach && homeProfile.reach
-      ? `reach ${awayProfile.reach}" vs ${homeProfile.reach}"`
-      : "";
-    const strNote = strkEdge > 0.05
-      ? `${awayProfile.displayName} has the striking edge (${awayProfile.strikeLPM.toFixed(1)} SLpM at ${awayProfile.strikeAccuracy.toFixed(0)}% acc vs ${homeProfile.strikeLPM.toFixed(1)} SLpM at ${homeProfile.strikeAccuracy.toFixed(0)}% acc)`
-      : strkEdge < -0.05
-        ? `${homeProfile.displayName} is the sharper striker (${homeProfile.strikeLPM.toFixed(1)} SLpM at ${homeProfile.strikeAccuracy.toFixed(0)}% acc vs ${awayProfile.strikeLPM.toFixed(1)} SLpM at ${awayProfile.strikeAccuracy.toFixed(0)}% acc)`
-        : `striking output is similar (${awayProfile.strikeLPM.toFixed(1)} vs ${homeProfile.strikeLPM.toFixed(1)} SLpM)`;
-    const tdNote = aTD > 0.1 || hTD > 0.1
-      ? tdEdge > 0.1
-        ? `${awayProfile.displayName} leans on grappling (${awayProfile.takedownAvg.toFixed(1)} TDs per 15min at ${awayProfile.takedownAccuracy.toFixed(0)}% acc${hTD > 0 ? ` vs ${homeProfile.takedownAvg.toFixed(1)} at ${homeProfile.takedownAccuracy.toFixed(0)}%` : ", opponent shows no TD game"})`
-        : tdEdge < -0.1
-          ? `${homeProfile.displayName} brings the takedown pressure (${homeProfile.takedownAvg.toFixed(1)} TDs per 15min at ${homeProfile.takedownAccuracy.toFixed(0)}% acc${aTD > 0 ? ` vs ${awayProfile.takedownAvg.toFixed(1)} at ${awayProfile.takedownAccuracy.toFixed(0)}%` : ", opponent shows no TD game"})`
-          : `both work takedowns (${awayProfile.takedownAvg.toFixed(1)} vs ${homeProfile.takedownAvg.toFixed(1)} per 15min)`
-      : "neither fighter shows significant wrestling volume";
-
-    // Pace & Cardio evaluation
-    const combinedSLpM = awayProfile.strikeLPM + homeProfile.strikeLPM;
-    const pace = combinedSLpM > 9 ? "High pace" : combinedSLpM > 6.5 ? "Moderate pace" : "Slow pace";
-    const cardioA = awayProfile.decisionPct > 40 ? "proven" : awayProfile.decisionPct < 15 ? "suspect" : "average";
-    const cardioH = homeProfile.decisionPct > 40 ? "proven" : homeProfile.decisionPct < 15 ? "suspect" : "average";
-    const cardio = `${awayProfile.displayName} cardio is ${cardioA}, ${homeProfile.displayName} is ${cardioH}`;
-
-    const under15 = Math.min(0.85, Math.max(0.1, pFinish * (scheduledRounds === 5 ? 0.45 : 0.65)));
-
-    summaryLines = [
-      `${weightClass}${scheduledRounds === 5 ? " · 5-round" : ""}`,
+  if (have && awayProfile && homeProfile) {
+    const aStrk = awayProfile.strikeLPM;
+    const hStrk = homeProfile.strikeLPM;
+    const stanceNote =
+      awayProfile.stance === homeProfile.stance
+        ? `both ${awayProfile.stance.toLowerCase()}`
+        : `${awayProfile.stance.toLowerCase()} vs ${homeProfile.stance.toLowerCase()}`;
+    const reachNote =
+      awayProfile.reach && homeProfile.reach
+        ? `reach ${awayProfile.reach}" vs ${homeProfile.reach}"`
+        : "";
+    const strkEdge = (aStrk - hStrk) / Math.max(1, aStrk + hStrk);
+    const strNote =
+      strkEdge > 0.05
+        ? `${awayProfile.displayName} has the striking edge (${aStrk.toFixed(1)} SLpM vs ${hStrk.toFixed(1)})`
+        : strkEdge < -0.05
+          ? `${homeProfile.displayName} is the sharper striker (${hStrk.toFixed(1)} SLpM vs ${aStrk.toFixed(1)})`
+          : `striking output is similar (${aStrk.toFixed(1)} vs ${hStrk.toFixed(1)} SLpM)`;
+    const aTD = awayProfile.takedownAvg;
+    const hTD = homeProfile.takedownAvg;
+    const tdNote =
+      aTD > 1 || hTD > 1
+        ? `takedowns per 15: ${awayProfile.displayName} ${aTD.toFixed(1)} (${awayProfile.takedownAccuracy.toFixed(0)}% acc) vs ${homeProfile.displayName} ${hTD.toFixed(1)} (${homeProfile.takedownAccuracy.toFixed(0)}% acc)`
+        : "neither fighter shows significant wrestling volume";
+    const combined = aStrk + hStrk;
+    pace = combined > 9 ? "High pace" : combined > 6.5 ? "Moderate pace" : "Slow pace";
+    const cardioOf = (p: FighterProfile) => (p.decisionPct > 40 ? "proven" : p.decisionPct < 15 ? "suspect" : "average");
+    cardio = `${awayProfile.displayName} cardio is ${cardioOf(awayProfile)}, ${homeProfile.displayName} is ${cardioOf(homeProfile)}`;
+    lines.push(
+      `${weightClass}${rounds === 5 ? " · 5-round" : ""}`,
       stanceNote + (reachNote ? ` · ${reachNote}` : ""),
       strNote,
       tdNote,
-      `${pace}. ${cardio}. u1.5 rds prob: ${(under15 * 100).toFixed(0)}%.`,
-    ];
+      `${pace}. ${cardio}. Model: ${(dist.pFinish * 100).toFixed(0)}% finish, ${(dist.pDecision * 100).toFixed(0)}% decision.`,
+    );
   } else {
-    // Record-only fallback
-    const diff = homeRec.pct - awayRec.pct;
-    const expEdge = (homeRec.fights - awayRec.fights) * 0.004;
-    pHome = Math.min(0.88, Math.max(0.12, 0.5 + diff * 1.9 + expEdge));
-    pFinish = Math.min(0.78, Math.max(0.24,
-      0.46 + (Math.max(pHome, 1 - pHome) - 0.5) * 0.55
-        + (heavy ? 0.10 : 0)
-        - (light ? 0.08 : 0)
-        - (scheduledRounds === 5 ? 0.04 : 0),
-    ));
-    summaryLines = [
-      `${weightClass}${scheduledRounds === 5 ? " · 5-round" : ""} · record-based model (ESPN stats pending)`,
-    ];
+    lines.push(
+      `${weightClass}${rounds === 5 ? " · 5-round" : ""} · record-based model (ESPN fighter stats unavailable)`,
+    );
   }
 
-  const pFav = Math.max(pHome, 1 - pHome);
-  const roundLine = scheduledRounds === 5 ? 2.5 : 1.5;
-  const expRounds = scheduledRounds * (1 - pFinish * 0.55);
-  const pRoundsOver = Math.min(0.90, Math.max(0.10, 1 - pFinish * (roundLine === 1.5 ? 0.62 : 0.78)));
-
   return {
-    pace: statsUsed ? (awayProfile!.strikeLPM + homeProfile!.strikeLPM > 9 ? "High pace" : "Moderate pace") : "Unknown pace",
-    cardio: "See summary",
-    pHome,
-    pAway: 1 - pHome,
-    fairHomeML: american(pHome),
-    fairAwayML: american(1 - pHome),
-    pFinish,
-    fairFinish: american(pFinish),
-    fairDecision: american(1 - pFinish),
-    expRounds: Math.round(expRounds * 100) / 100,
-    roundLine,
-    pRoundsOver,
-    fairRoundsOver: american(pRoundsOver),
-    fairRoundsUnder: american(1 - pRoundsOver),
-    statsUsed,
-    summary: summaryLines.filter(Boolean).join(" · "),
+    ...legacy,
+    statsUsed: have,
+    summary: lines.filter(Boolean).join(" · "),
+    pace,
+    cardio,
+    dist,
   };
 }

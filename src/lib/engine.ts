@@ -5,24 +5,42 @@ import {
   runs,
   type CouncilDecision,
   type GradeSpec,
+  type MmaGrade,
   type TraceEntry,
 } from "@/db/schema";
-import { and, desc, eq, inArray, lt, ne, sql as dsql } from "drizzle-orm";
+import { and, asc, eq, lt } from "drizzle-orm";
+import { ensureAgentsSeeded, settleAgentRatings, type GradedForRating } from "./agents";
+import { fmtOdds, pct, type Candidate } from "./candidate";
+import { DISCIPLINES, disciplineOf, type Discipline } from "./discipline";
 import {
-  COMBAT_SPORTS,
   getFinals,
   getSlateDetailed,
   lookupPlayerStat,
+  mapLimit,
+  type FinalScore,
   type GameInfo,
 } from "./espn";
-import { llmJson, targetFor, type KeyBag } from "./llm";
-import { ensureAgentsSeeded, settleAgentRatings } from "./agents";
-import { ensureSchema } from "./schema";
+import {
+  buildEnhancedCombatModel,
+  fetchBoutMoneylines,
+  fetchBoutProfiles,
+  fetchFightStatLine,
+} from "./fighter-stats";
+import { describeFight, settleMma, settleTeam, type FightStatsLike, type Outcome } from "./grading";
+import { loadHealth, NEUTRAL, type BucketHealth, type HealthReport } from "./health";
+import { targetFor, type KeyBag } from "./llm";
+import { buildFilter, COMBAT_CATEGORIES, type MarketFilter } from "./markets";
+import { evaluateBout } from "./mma-picks";
 import { HOUSE } from "./owner";
-import { allowsCandidate, buildFilter, type MarketFilter } from "./markets";
-import { fetchBoutProfiles, buildEnhancedCombatModel } from "./fighter-stats";
+import { applyReviews, collectReviews, type ReviewJob, type SourcedReview } from "./review";
+import { ensureSchema } from "./schema";
+import { MAX_UNITS_BOOK, MAX_UNITS_MODEL, nearMisses, selectCard, sizeOf } from "./selection";
+import { evaluateTeamGame, type GameIntel } from "./team-model";
 
 export const revalidate = 0;
+
+/** Marks rows written by this engine. Rows from before the rewrite carry 4. */
+export const ENGINE_VERSION = 5;
 
 // ---------------------------------------------------------------------------
 // slate cache (hot path shared by UI + pipeline)
@@ -45,737 +63,77 @@ export async function cachedSlate(
     budgetMs: opts.budgetMs ?? 12_000,
     maxInjuryLookups: opts.maxInjuryLookups ?? 30,
   });
-
-  // Enrich upcoming combat bouts with real ESPN fighter stats (parallel, budget-capped)
-  const combatPre = games.filter(
-    (g) => g.status === "pre" && g.combat && g.combat.eventId && g.combat.competitionId,
-  );
-  if (combatPre.length > 0) {
-    const statDeadline = Date.now() + 6000;
-    await Promise.all(
-      combatPre.slice(0, 12).map(async (g) => {
-        if (!g.combat || Date.now() > statDeadline) return;
-        try {
-          const { away: ap, home: hp } = await fetchBoutProfiles(
-            g.combat.eventId,
-            g.combat.competitionId,
-            g.combat.league as "ufc" | "pfl",
-          );
-          const enhanced = buildEnhancedCombatModel(
-            g.away.record,
-            g.home.record,
-            g.combat.weightClass,
-            g.combat.scheduledRounds,
-            ap,
-            hp,
-          );
-          g.combat.model = { ...enhanced };
-          if (enhanced.summary) g.context.notes = [enhanced.summary];
-        } catch {
-          /* fallback stays in place */
-        }
-      }),
-    );
-  }
-
+  const note = await enrichCombat(games);
+  if (note) degraded.push(note);
   slateCache.set(key, { at: Date.now(), games, degraded });
   return { games, degraded };
 }
 
-// ---------------------------------------------------------------------------
-// quantitative core (deterministic edge model — the "no keys required" brain)
-// ---------------------------------------------------------------------------
-
-const HOME_ADV: Record<string, number> = {
-  nba: 2.6, ncaab: 3.0, nfl: 2.1, ncaaf: 2.5, nhl: 0.32, mlb: 0.32,
-};
-const MARGIN_SCALE: Record<string, number> = {
-  nba: 23, ncaab: 24, nfl: 26, ncaaf: 26, nhl: 1.15, mlb: 1.05,
-};
-const EDGE_MIN: Record<string, number> = {
-  nba: 2.0, ncaab: 2.2, nfl: 1.9, ncaaf: 2.4, nhl: 0.38, mlb: 0.34,
-};
-const PTS_PER_OUT: Record<string, number> = {
-  nba: 1.5, ncaab: 1.4, nfl: 2.1, ncaaf: 2.1, nhl: 0.22, mlb: 0.28,
-};
-const B2B_PEN: Record<string, number> = {
-  nba: 1.8, ncaab: 1.5, nfl: 2.0, ncaaf: 1.8, nhl: 0.28, mlb: 0.18,
-};
-const AVG_TOTAL: Record<string, number> = {
-  nba: 224, ncaab: 144, nfl: 45.5, ncaaf: 55, nhl: 6.1, mlb: 8.5,
-};
-
-function winPct(record: string): number {
-  const m = record.match(/(\d+)[-–](\d+)/);
-  if (!m) return 0.5;
-  const w = Number(m[1]);
-  const l = Number(m[2]);
-  return w + l > 0 ? w / (w + l) : 0.5;
-}
-
-export interface Candidate {
-  id: number;
-  game: GameInfo;
-  category: string;
-  pick: string;
-  lineLabel: string;
-  odds: number;
-  edge: number;
-  confidence: number;
-  signals: string[]; // contributing scout codenames
-  thesis: string;
-  grade: GradeSpec;
-  vetoed?: string;
-  discount?: string;
-  finalUnits?: number;
-}
-
-function impliedProb(ml: number): number {
-  return ml < 0 ? -ml / (-ml + 100) : 100 / (ml + 100);
-}
-
-// deterministic ±2.5 jitter so identical-edge boards still rank with texture
-function jitter(seed: string): number {
-  let h = 0;
-  for (const ch of seed) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-  return ((h % 50) - 25) / 10;
-}
-
-function logistic(margin: number, sport: string): number {
-  const scale = sport === "nhl" || sport === "mlb" ? 0.55 : 6.2;
-  return 1 / (1 + Math.exp(-margin / scale));
-}
-
-function injuryImpact(g: GameInfo, abbr: string): { pts: number; outs: number } {
-  const mine = g.injuries.filter((i) => i.team === abbr || i.team.includes(abbr));
-  let outs = 0;
-  let weight = 0;
-  for (const inj of mine) {
-    const s = inj.status.toLowerCase();
-    if (s.includes("out") || s.includes("inactive") || s.includes("injured reserve")) {
-      outs += 1;
-      weight += 1;
-    } else if (s.includes("doubt")) weight += 0.7;
-    else if (s.includes("question") || s.includes("day-to-day") || s.includes("game time"))
-      weight += 0.3;
-  }
-  const eff = Math.min(weight, 3);
-  return { pts: eff * (PTS_PER_OUT[g.sport] ?? 1), outs };
-}
-
-interface ModelOut {
-  margin: number; // home perspective model margin, sport units
-  signals: string[];
-  intel: { quant: string; medic: string; chrono: string; sharp: string; matchup: string };
-  restEdge: number;
-  injNote: string;
-}
-
-function buildModel(g: GameInfo): ModelOut {
-  const hp = winPct(g.home.record);
-  const ap = winPct(g.away.record);
-  const scale = MARGIN_SCALE[g.sport] ?? 20;
-  const homeSplit = winPct(g.home.homeRecord || g.home.record);
-  const awaySplit = winPct(g.away.awayRecord || g.away.record);
-  let margin = (hp - ap) * scale + (HOME_ADV[g.sport] ?? 2);
-  margin += (homeSplit - hp) * 4 + (awaySplit - ap) * -4 * 0;
-
-  const signals = ["QUANT"];
-  const injHome = injuryImpact(g, g.home.abbr);
-  const injAway = injuryImpact(g, g.away.abbr);
-  margin += injAway.pts - injHome.pts;
-  if (injHome.outs + injAway.outs > 0) signals.push("MEDIC");
-
-  let restEdge = 0;
-  let restNote = "standard rest both sides";
-  if (g.rest) {
-    const pen = B2B_PEN[g.sport] ?? 1.5;
-    let adj = 0;
-    const bits: string[] = [];
-    if (g.rest.homeB2B && !g.rest.awayB2B) {
-      adj -= pen;
-      bits.push(`${g.home.abbr} on a back-to-back`);
-      if (g.rest.homeTravel && g.rest.awayDays >= 1) {
-        adj -= 0.6;
-        bits.push("with travel");
+/**
+ * Upcoming bouts get real ESPN fighter statistics (parallel, budget-capped),
+ * rebuild their joint model from them, and — when ESPN happens to publish a
+ * moneyline — a real price. Returns a short note when stats were unavailable.
+ */
+export async function enrichCombat(games: GameInfo[], budgetMs = 8_000): Promise<string | null> {
+  const pre = games.filter((g) => g.status === "pre" && g.combat?.eventId && g.combat.competitionId);
+  if (!pre.length) return null;
+  const deadline = Date.now() + budgetMs;
+  let withStats = 0;
+  let attempted = 0;
+  await mapLimit(pre.slice(0, 16), 6, async (g) => {
+    const c = g.combat;
+    if (!c || Date.now() > deadline) return;
+    attempted++;
+    try {
+      const league = c.league as "ufc" | "pfl";
+      const { away: ap, home: hp, ids } = await fetchBoutProfiles(c.eventId, c.competitionId, league);
+      const enhanced = buildEnhancedCombatModel(
+        g.away.record,
+        g.home.record,
+        c.weightClass,
+        c.scheduledRounds,
+        ap,
+        hp,
+        c.promotion,
+      );
+      c.model = { ...enhanced };
+      c.dist = enhanced.dist;
+      if (ids.away && ids.home) c.fighterIds = { away: ids.away, home: ids.home };
+      if (enhanced.summary) g.context.notes = [enhanced.summary];
+      if (enhanced.statsUsed) withStats++;
+      if (Date.now() < deadline && !g.odds) {
+        const ml = await fetchBoutMoneylines(league, c.eventId, c.competitionId, c.fighterIds.away, c.fighterIds.home);
+        if (ml) {
+          g.odds = {
+            provider: "ESPN",
+            details: `ML ${g.away.abbr} ${fmtOdds(ml.away)} / ${g.home.abbr} ${fmtOdds(ml.home)}`,
+            homeSpread: null,
+            homeSpreadOdds: null,
+            awaySpreadOdds: null,
+            homeML: ml.home,
+            awayML: ml.away,
+            overUnder: null,
+            overOdds: null,
+            underOdds: null,
+            homeTeamTotal: null,
+            awayTeamTotal: null,
+            teamTotalsDerived: false,
+          };
+          c.priceSource = "espn";
+        }
       }
+    } catch {
+      /* the record-based model from the scoreboard stays in place */
     }
-    if (g.rest.awayB2B && !g.rest.homeB2B) {
-      adj += pen;
-      bits.push(`${g.away.abbr} on a back-to-back`);
-      if (g.rest.awayTravel && g.rest.homeDays >= 1) {
-        adj += 0.6;
-        bits.push("with travel");
-      }
-    }
-    if (g.rest.home3in4 && !g.rest.away3in4 && !g.rest.homeB2B) {
-      adj -= pen * 0.5;
-      bits.push(`${g.home.abbr} 3-in-4 legs`);
-    }
-    if (g.rest.away3in4 && !g.rest.home3in4 && !g.rest.awayB2B) {
-      adj += pen * 0.5;
-      bits.push(`${g.away.abbr} 3-in-4 legs`);
-    }
-    if (g.rest.homeDays >= 2 && g.rest.awayDays === 0) adj += 0.7;
-    if (g.rest.awayDays >= 2 && g.rest.homeDays === 0) adj -= 0.7;
-    restEdge = adj;
-    margin += adj;
-    if (bits.length) {
-      signals.push("CHRONO");
-      restNote = bits.join(", ");
-    }
-  }
-  if (g.odds) signals.push("SHARP");
-
-  return {
-    margin,
-    signals: [...new Set(signals)],
-    restEdge,
-    injNote:
-      injHome.outs + injAway.outs > 0
-        ? `${g.away.abbr} ${injAway.outs} confirmed out / ${g.home.abbr} ${injHome.outs} confirmed out`
-        : "no confirmed outs on the report",
-    intel: { quant: "", medic: "", chrono: "", sharp: "", matchup: "" },
-  };
-}
-
-function mlFair(margin: number, sport: string): number {
-  const p = logistic(Math.abs(margin), sport);
-  if (p >= 0.5) return -Math.round((p / (1 - p)) * 100);
-  return Math.round(((1 - p) / p) * 100);
-}
-
-function combatCandidates(g: GameInfo, nextId: () => number): Candidate[] {
-  const c = g.combat;
-  if (!c) return [];
-  const m = c.model;
-  const out: Candidate[] = [];
-  const favHome = m.pHome >= 0.5;
-  const pFav = Math.max(m.pHome, m.pAway);
-  const fav = favHome ? g.home : g.away;
-  const dog = favHome ? g.away : g.home;
-  const favPrice = favHome ? m.fairHomeML : m.fairAwayML;
-  const priceTag = `${favPrice > 0 ? "+" : ""}${favPrice}`;
-
-  // ---- winner ----
-  // DWCS/PFL prospect fights are frequently near coin-flips; only a real
-  // separation in record strength earns a side.
-  const statsLabel = (m as any).statsUsed ? "ESPN career stats" : "record-based model";
-  const matchupSummary = (m as any).summary || `${c.weightClass} ${c.scheduledRounds}rd bout`;
-  const under15 = (m.pFinish * (c.scheduledRounds === 5 ? 0.4 : 0.6) * 100).toFixed(0);
-  const mmaExtra = `u1.5 rds prob: ${under15}%.`;
-
-  if (pFav >= 0.53) {
-    out.push({
-      id: nextId(), game: g, category: "fight_ml",
-      pick: `${fav.name} to win`,
-      lineLabel: `model ${priceTag}`,
-      odds: favPrice,
-      edge: (pFav - 0.5) * 100,
-      confidence: Math.min(66, 52 + (pFav - 0.5) * 52 + ((m as any).statsUsed ? 3 : 0) + jitter(g.eventId + "fml")),
-      signals: (m as any).statsUsed ? ["QUANT", "MATCHUP", "PROPS"] : ["QUANT", "MATCHUP"],
-      thesis: `${fav.name} (${fav.record}) vs ${dog.name} (${dog.record}). ${matchupSummary}. ${mmaExtra} ${statsLabel} makes ${fav.name} a ${(pFav * 100).toFixed(0)}% favourite. `,
-      grade: { side: favHome ? "home" : "away", line: null },
-    });
-  }
-
-  // ---- method: finish vs decision ----
-  if (Math.abs(m.pFinish - 0.5) >= 0.03) {
-    const finish = m.pFinish > 0.5;
-    const price = finish ? m.fairFinish : m.fairDecision;
-    out.push({
-      id: nextId(), game: g, category: "fight_method",
-      pick: finish
-        ? `${g.away.abbr} vs ${g.home.abbr} — does NOT go the distance`
-        : `${g.away.abbr} vs ${g.home.abbr} — GOES the distance`,
-      lineLabel: finish ? "inside the distance" : "decision",
-      odds: price,
-      edge: Math.abs(m.pFinish - 0.5) * 100,
-      confidence: Math.min(62, 52 + Math.abs(m.pFinish - 0.5) * 42 + ((m as any).statsUsed ? 2 : 0) + jitter(g.eventId + "fm")),
-      signals: (m as any).statsUsed ? ["MATCHUP", "PROPS", "QUANT"] : ["MATCHUP", "PROPS"],
-      thesis: `${matchupSummary}. ${mmaExtra} ${statsLabel} models ${(m.pFinish * 100).toFixed(0)}% stoppage probability — ${finish ? "finishing tendencies and striking output favour an early end" : "both fighters' decision percentages and cardio point to the scorecards"}. `,
-      grade: { side: finish ? "under" : "over", line: c.scheduledRounds, segment: "FIGHT" },
-    });
-  }
-
-  // ---- round totals ----
-  if (Math.abs(m.pRoundsOver - 0.5) >= 0.03) {
-    const over = m.pRoundsOver > 0.5;
-    const price = over ? m.fairRoundsOver : m.fairRoundsUnder;
-    out.push({
-      id: nextId(), game: g, category: "fight_rounds",
-      pick: `${g.away.abbr} vs ${g.home.abbr} — ${over ? "over" : "under"} ${m.roundLine} rounds`,
-      lineLabel: `${over ? "o" : "u"}${m.roundLine} rounds`,
-      odds: price,
-      edge: Math.abs(m.pRoundsOver - 0.5) * 100,
-      confidence: Math.min(60, 52 + Math.abs(m.pRoundsOver - 0.5) * 34 + jitter(g.eventId + "fr")),
-      signals: ["MATCHUP", "PROPS"],
-      thesis: `Model expects about ${m.expRounds.toFixed(1)} completed rounds in this ${c.scheduledRounds}-rounder (${(m.pFinish * 100).toFixed(0)}% stoppage risk), landing ${over ? "beyond" : "short of"} ${m.roundLine} at a model price of ${price > 0 ? "+" : ""}${price}.`,
-      grade: { side: over ? "over" : "under", line: m.roundLine, segment: "FIGHT" },
-    });
-  }
-  return out;
-}
-
-function candidatesFor(g: GameInfo, nextId: () => number): {
-  cands: Candidate[];
-  model: ModelOut;
-} {
-  const model = buildModel(g);
-  if (COMBAT_SPORTS.has(g.sport)) {
-    return { cands: combatCandidates(g, nextId), model };
-  }
-  const cands: Candidate[] = [];
-  const o = g.odds;
-  const mk = (
-    category: string,
-    pick: string,
-    lineLabel: string,
-    odds: number,
-    edge: number,
-    confidence: number,
-    thesis: string,
-    grade: GradeSpec,
-    extra: string[] = [],
-  ): Candidate => ({
-    id: nextId(),
-    game: g,
-    category,
-    pick,
-    lineLabel,
-    odds,
-    edge,
-    confidence,
-    signals: [...new Set([...model.signals, ...extra])],
-    thesis,
-    grade,
   });
-
-  if (o?.homeSpread != null) {
-    const diff = model.margin - o.homeSpread; // + → home value
-    const min = EDGE_MIN[g.sport] ?? 2;
-    if (Math.abs(diff) >= min) {
-      const homeSide = diff > 0;
-      const team = homeSide ? g.home : g.away;
-      const line = homeSide ? o.homeSpread : -o.homeSpread;
-      const conf = Math.min(70, 54 + Math.min(13, Math.max(0, Math.abs(diff) - min) * 2.1) + jitter(g.eventId + "sp"));
-      const juice = (homeSide ? o.homeSpreadOdds : o.awaySpreadOdds) ?? -110;
-      cands.push(
-        mk(
-          "spread",
-          `${team.name} ${line > 0 ? "+" : ""}${Number(line.toFixed(1))}`,
-          `spread ${line > 0 ? "+" : ""}${Number(line.toFixed(1))}`,
-          juice,
-          Math.abs(diff),
-          conf,
-          `Model makes this ${fmtLine(model.margin)} for ${g.home.abbr}; market has ${fmtLine(
-            o.homeSpread,
-          )}. ${edgeWhy(model, g, homeSide)}`,
-          { side: homeSide ? "home" : "away", line },
-        ),
-      );
-    }
+  if (attempted && withStats === 0) {
+    return `ESPN fighter stats were unavailable for all ${attempted} bouts — MMA picks fall back to records only (stricter bar, no strikes/takedown/method props)`;
   }
-
-  if (o?.homeML != null && o?.awayML != null) {
-    const pHome = logistic(model.margin, g.sport);
-    const ipHome = impliedProb(o.homeML);
-    const ipAway = impliedProb(o.awayML);
-    const eH = pHome - ipHome;
-    const eA = 1 - pHome - ipAway;
-    if (eH >= 0.045) {
-      cands.push(
-        mk(
-          "moneyline",
-          `${g.home.name} ML`,
-          `ML ${o.homeML > 0 ? "+" : ""}${o.homeML}`,
-          o.homeML,
-          eH * 100,
-          Math.min(66, 54 + eH * 130),
-          `Fair price ${mlFair(model.margin, g.sport)} vs market ${
-            o.homeML > 0 ? "+" : ""
-          }${o.homeML}. ${(eH * 100).toFixed(1)}% probability edge on ${g.home.abbr}.`,
-          { side: "home", line: null },
-        ),
-      );
-    } else if (eA >= 0.045) {
-      cands.push(
-        mk(
-          "moneyline",
-          `${g.away.name} ML`,
-          `ML ${o.awayML > 0 ? "+" : ""}${o.awayML}`,
-          o.awayML,
-          eA * 100,
-          Math.min(66, 54 + eA * 130),
-          `Fair price ${oppFair(model.margin, g.sport)} vs market ${
-            o.awayML > 0 ? "+" : ""
-          }${o.awayML}. ${(eA * 100).toFixed(1)}% probability edge on ${g.away.abbr}.`,
-          { side: "away", line: null },
-        ),
-      );
-    }
-  }
-
-  if (o?.overUnder != null) {
-    const avg = AVG_TOTAL[g.sport] ?? 0;
-    const bothGood = winPct(g.home.record) > 0.55 && winPct(g.away.record) > 0.55;
-    const bothBad = winPct(g.home.record) < 0.45 && winPct(g.away.record) < 0.45;
-    let lean = avg - o.overUnder;
-    if (bothGood) lean += (avg * 0.012);
-    if (bothBad) lean -= avg * 0.012;
-    if (g.rest?.homeB2B || g.rest?.awayB2B) lean -= avg * 0.009; // tired legs, missed shots
-    const noise = (avg <= 10 ? 0.55 : avg <= 50 ? 2.2 : 4.5) * 0.85;
-    if (Math.abs(lean) >= noise) {
-      const over = lean > 0;
-      const relative = (Math.abs(lean) - noise) / Math.max(1e-6, noise);
-      const conf = Math.min(64, 53 + Math.min(9, relative * 3.8) + jitter(g.eventId + "tot") + (over && bothGood ? 1.5 : 0));
-      cands.push(
-        mk(
-          "total",
-          `${over ? "Over" : "Under"} ${o.overUnder} (${g.matchup})`,
-          `${over ? "over" : "under"} ${o.overUnder}`,
-          over ? o.overOdds ?? -110 : o.underOdds ?? -110,
-          Math.abs(lean),
-          conf,
-          `${over ? "Pace-up environment" : "Suppressed-scoring profile"} — slate-average is ${avg}, book hangs ${o.overUnder}. ${
-            g.rest?.homeB2B || g.rest?.awayB2B ? "Fatigue taxes the over. " : ""
-          }${bothGood ? "Two winning profiles push tempo." : bothBad ? "Limited offensive ceiling on both sidelines." : ""}`,
-          { side: over ? "over" : "under", line: o.overUnder },
-        ),
-      );
-    }
-
-    // ---------------- derived markets ----------------
-    // Model projections for both sides, from the model margin + model total.
-    const modelTotal = o.overUnder + lean;
-    const modelHome = modelTotal / 2 + model.margin / 2;
-    const modelAway = modelTotal / 2 - model.margin / 2;
-
-    // --- team totals ---
-    for (const side of ["home", "away"] as const) {
-      const tt = side === "home" ? o.homeTeamTotal : o.awayTeamTotal;
-      const proj = side === "home" ? modelHome : modelAway;
-      const team = side === "home" ? g.home : g.away;
-      if (tt == null) continue;
-      const gap = proj - tt;
-      const need = (AVG_TOTAL[g.sport] ?? 40) <= 10 ? 0.45 : (AVG_TOTAL[g.sport] ?? 40) <= 50 ? 1.9 : 3.4;
-      if (Math.abs(gap) < need) continue;
-      const over = gap > 0;
-      cands.push(
-        mk(
-          "team_total",
-          `${team.name} team total ${over ? "over" : "under"} ${tt}`,
-          `${over ? "o" : "u"}${tt}`,
-          -110,
-          Math.abs(gap),
-          Math.min(62, 53.5 + Math.min(8, Math.abs(gap) / need * 3.4) + jitter(g.eventId + side + "tt")),
-          `Model projects ${team.abbr} for ${proj.toFixed(1)} vs a ${o.teamTotalsDerived ? "derived" : "posted"} team total of ${tt}. ${edgeWhy(model, g, side === "home")}`,
-          { side: over ? "team_over" : "team_under", line: tt, teamAbbr: team.abbr },
-          ["MATCHUP"],
-        ),
-      );
-    }
-
-    // --- first half / quarter / period derivatives ---
-    const isFootball = g.sport === "nfl" || g.sport === "ncaaf";
-    const isHoops = g.sport === "nba" || g.sport === "ncaab";
-    if (isFootball || isHoops) {
-      const tMul = isFootball ? 0.49 : 0.505; // 1H share of game total
-      const sMul = isFootball ? 0.55 : 0.52; // 1H share of game spread
-      const halfTotal = Math.round(o.overUnder * tMul * 2) / 2;
-      const halfLean = lean * tMul;
-      const halfNoise = isFootball ? 1.9 : 2.0;
-      if (Math.abs(halfLean) >= halfNoise) {
-        const over = halfLean > 0;
-        cands.push(
-          mk(
-            "1h_total",
-            `1st half ${over ? "over" : "under"} ${halfTotal} (${g.matchup})`,
-            `1H ${over ? "o" : "u"}${halfTotal}`,
-            -110,
-            Math.abs(halfLean),
-            Math.min(60, 53 + Math.min(6, Math.abs(halfLean)) + jitter(g.eventId + "1ht")),
-            `Full-game model leans ${over ? "over" : "under"} by ${Math.abs(lean).toFixed(1)}; scripts tend to show early, so the first-half number at ${halfTotal} carries the same edge at reduced variance.`,
-            { side: over ? "over" : "under", line: halfTotal, segment: "1H" },
-            ["MATCHUP", "CHRONO"],
-          ),
-        );
-      }
-      if (o.homeSpread != null) {
-        const halfSpread = Math.round(o.homeSpread * sMul * 2) / 2;
-        const halfMargin = model.margin * sMul;
-        const hDiff = halfMargin - halfSpread;
-        if (Math.abs(hDiff) >= (isFootball ? 1.6 : 1.5)) {
-          const homeSide = hDiff > 0;
-          const team = homeSide ? g.home : g.away;
-          const line = homeSide ? halfSpread : -halfSpread;
-          cands.push(
-            mk(
-              "1h_spread",
-              `${team.name} 1st half ${line > 0 ? "+" : ""}${line}`,
-              `1H ${line > 0 ? "+" : ""}${line}`,
-              -110,
-              Math.abs(hDiff),
-              Math.min(61, 53 + Math.min(7, Math.abs(hDiff) * 1.8) + jitter(g.eventId + "1hs")),
-              `${team.abbr} is the stronger early-script side: model half-margin ${halfMargin.toFixed(1)} vs a ${halfSpread > 0 ? "+" : ""}${halfSpread} first-half number. Avoids late garbage-time noise.`,
-              { side: homeSide ? "home" : "away", line, segment: "1H" },
-              ["MATCHUP"],
-            ),
-          );
-        }
-      }
-      // opening period total (NCAAB plays halves, so quarters don't apply)
-      if (g.sport !== "ncaab") {
-        const qMul = isFootball ? 0.235 : 0.253;
-        const qTotal = Math.round(o.overUnder * qMul * 2) / 2;
-        const qLean = lean * qMul;
-        if (Math.abs(qLean) >= (isFootball ? 1.0 : 1.2)) {
-          const over = qLean > 0;
-          cands.push(
-            mk(
-              "1q_total",
-              `1st quarter ${over ? "over" : "under"} ${qTotal} (${g.matchup})`,
-              `1Q ${over ? "o" : "u"}${qTotal}`,
-              -115,
-              Math.abs(qLean),
-              Math.min(58, 52.5 + Math.min(5, Math.abs(qLean) * 2.2) + jitter(g.eventId + "1qt")),
-              `Opening-frame derivative of the same ${over ? "over" : "under"} thesis, priced at ${qTotal}. Small stake — single-quarter variance is high.`,
-              { side: over ? "over" : "under", line: qTotal, segment: "1Q" },
-              ["MATCHUP"],
-            ),
-          );
-        }
-      }
-    }
-
-    if (g.sport === "nhl") {
-      const p1Total = Math.round(o.overUnder * 0.315 * 2) / 2;
-      const p1Lean = lean * 0.315;
-      if (Math.abs(p1Lean) >= 0.22) {
-        const over = p1Lean > 0;
-        cands.push(
-          mk(
-            "p1_total",
-            `1st period ${over ? "over" : "under"} ${p1Total} (${g.matchup})`,
-            `P1 ${over ? "o" : "u"}${p1Total}`,
-            over ? 115 : -135,
-            Math.abs(p1Lean),
-            Math.min(58, 53 + Math.min(5, Math.abs(p1Lean) * 9) + jitter(g.eventId + "p1")),
-            `First-period derivative of the game total read. ${over ? "Both clubs open fast" : "Feeling-out period favors the under"} at ${p1Total}.`,
-            { side: over ? "over" : "under", line: p1Total, segment: "P1" },
-            ["MATCHUP"],
-          ),
-        );
-      }
-    }
-
-    if (g.sport === "mlb") {
-      // First five innings — the starters' market.
-      const f5Total = Math.round(o.overUnder * 0.55 * 2) / 2;
-      const f5Lean = lean * 0.55;
-      if (Math.abs(f5Lean) >= 0.28) {
-        const over = f5Lean > 0;
-        cands.push(
-          mk(
-            "f5_total",
-            `First 5 innings ${over ? "over" : "under"} ${f5Total} (${g.matchup})`,
-            `F5 ${over ? "o" : "u"}${f5Total}`,
-            -115,
-            Math.abs(f5Lean),
-            Math.min(60, 53 + Math.min(6, Math.abs(f5Lean) * 7) + jitter(g.eventId + "f5")),
-            `F5 removes bullpen variance and isolates the starters — the same ${over ? "over" : "under"} lean at ${f5Total}.`,
-            { side: over ? "over" : "under", line: f5Total, segment: "F5" },
-            ["MATCHUP"],
-          ),
-        );
-      }
-      // NRFI / YRFI via Poisson on first-inning run expectancy.
-      const perTeamInning = (o.overUnder / 2) / 9;
-      const lam1 = perTeamInning * 1.18; // top of the order bats first
-      const pNRFI = Math.exp(-2 * lam1);
-      if (pNRFI >= 0.54 || pNRFI <= 0.46) {
-        const nrfi = pNRFI >= 0.5;
-        cands.push(
-          mk(
-            nrfi ? "nrfi" : "nrfi",
-            nrfi ? `No Runs First Inning (${g.matchup})` : `Yes Runs First Inning (${g.matchup})`,
-            nrfi ? "NRFI" : "YRFI",
-            nrfi ? -125 : 105,
-            Math.abs(pNRFI - 0.5) * 100,
-            Math.min(60, 52.5 + Math.abs(pNRFI - 0.5) * 60 + jitter(g.eventId + "nrfi")),
-            `First-inning run expectancy models at ${(lam1 * 2).toFixed(2)} runs → ${(pNRFI * 100).toFixed(0)}% scoreless. Posted total of ${o.overUnder} supports the ${nrfi ? "NRFI" : "YRFI"} side.`,
-            { side: nrfi ? "under" : "over", line: 0.5, segment: "1I" },
-            ["MATCHUP"],
-          ),
-        );
-      }
-    }
-  }
-
-  // ---------------- player props from real season production ----------------
-  for (const L of g.leaders) {
-    if (L.perGame == null || !L.teamAbbr) continue;
-
-    // touchdown markets are priced as probabilities, not yardage lines
-    if (L.stat === "ANY_TD" || L.stat === "PASS_TD") {
-      const isHomeTd = L.teamAbbr === g.home.abbr;
-      const spreadTd = o?.homeSpread ?? 0;
-      const favMarginTd = isHomeTd ? -spreadTd : spreadTd;
-      // favourites find the end zone more often
-      const lambda = Math.max(0.05, L.perGame * (1 + favMarginTd * 0.022));
-      if (L.stat === "ANY_TD") {
-        const pScore = 1 - Math.exp(-lambda);
-        if (pScore >= 0.5) {
-          const rawFair = pScore >= 0.5 ? -Math.round((pScore / (1 - pScore)) * 100) : 100;
-          // books shade anytime-TD prices; never quote beyond a realistic range
-          const fair = Math.max(-190, rawFair);
-          cands.push(
-            mk(
-              "player_prop",
-              `${L.athlete} anytime touchdown`,
-              "anytime TD",
-              fair,
-              (pScore - 0.5) * 100,
-              Math.min(60, 53 + (pScore - 0.5) * 34 + jitter(g.eventId + L.athlete + "td")),
-              `${L.athlete} (${L.teamAbbr}) is finding the end zone ${L.perGame} times per game. Game script ${favMarginTd > 0 ? "as a favourite" : "as an underdog"} models a ${(pScore * 100).toFixed(0)}% chance of a touchdown.`,
-              { side: "team_over", line: 0.5, player: L.athlete, stat: "ANY_TD", teamAbbr: L.teamAbbr },
-              ["PROPS"],
-            ),
-          );
-        }
-      } else {
-        const lineTd = lambda >= 1.9 ? 1.5 : 0.5;
-        const pOver = 1 - poissonCdf(lineTd, lambda);
-        if (Math.abs(pOver - 0.5) >= 0.06) {
-          const over = pOver > 0.5;
-          cands.push(
-            mk(
-              "player_prop",
-              `${L.athlete} ${over ? "over" : "under"} ${lineTd} passing TDs`,
-              `${over ? "o" : "u"}${lineTd} pass TD`,
-              -115,
-              Math.abs(pOver - 0.5) * 100,
-              Math.min(60, 53 + Math.abs(pOver - 0.5) * 34 + jitter(g.eventId + L.athlete + "ptd")),
-              `${L.athlete} averages ${L.perGame} passing touchdowns per game; model lands at ${lambda.toFixed(2)} expected against this matchup — ${(pOver * 100).toFixed(0)}% to clear ${lineTd}.`,
-              { side: over ? "team_over" : "team_under", line: lineTd, player: L.athlete, stat: "PASS_TD", teamAbbr: L.teamAbbr },
-              ["PROPS"],
-            ),
-          );
-        }
-      }
-      continue;
-    }
-
-    const isHome = L.teamAbbr === g.home.abbr;
-    const spread = o?.homeSpread ?? 0;
-    // Game script: favorites run more, underdogs throw more.
-    const favMargin = isHome ? -spread : spread; // + means this team is favored
-    let adj = 0;
-    // Game-script adjustments: favourites run more, underdogs throw more.
-    // Rest/fatigue: B2B teams regress slightly on all stats.
-    if (L.stat === "RUSH_YDS") adj = favMargin * 1.4;
-    else if (L.stat === "PASS_YDS") adj = -favMargin * 3.0;
-    else if (L.stat === "REC_YDS") adj = -favMargin * 1.1;
-    else if (L.stat === "PTS" || L.stat === "REB" || L.stat === "AST") {
-      const outs = g.injuries.filter(
-        (i) => i.team === L.teamAbbr && /out|doubt/i.test(i.status),
-      ).length;
-      adj = outs * (L.stat === "PTS" ? 2.2 : 0.8);
-    }
-    // Model margin vs the market spread opens extra yardage edges
-    const marginEdge = Math.abs(model.margin - (o?.homeSpread ?? 0));
-    if (L.stat === "RUSH_YDS" && isHome === (model.margin > (o?.homeSpread ?? 0)))
-      adj += marginEdge * 0.8;
-    else if (L.stat === "PASS_YDS" && isHome !== (model.margin > (o?.homeSpread ?? 0)))
-      adj += marginEdge * 1.8;
-    else if (L.stat === "REC_YDS" && isHome !== (model.margin > (o?.homeSpread ?? 0)))
-      adj += marginEdge * 0.6;
-    // fatigue effect
-    if (g.rest) {
-      const tired = isHome ? g.rest.homeB2B : g.rest.awayB2B;
-      if (tired) adj -= L.perGame * 0.04;
-    }
-    const projection = L.perGame + adj;
-    // Line is at the season rate, bumped half a point toward the projection
-    // to create a realistic market-shaped number.
-    const line = Math.round((L.perGame + (projection > L.perGame ? 0.5 : -0.5)) * 2) / 2;
-    const gap = projection - line;
-    const need =
-      L.stat === "PASS_YDS" ? 8 :
-      L.stat === "RUSH_YDS" ? 4 :
-      L.stat === "REC_YDS" ? 4 :
-      L.stat === "PTS" ? 1.4 : 0.7;
-    if (Math.abs(gap) < need) continue;
-    const over = gap > 0;
-    cands.push(
-      mk(
-        "player_prop",
-        `${L.athlete} ${over ? "over" : "under"} ${line} ${statLabel(L.stat)}`,
-        `${over ? "o" : "u"}${line}`,
-        -110,
-        Math.abs(gap),
-        Math.min(60, 53 + Math.min(6, (Math.abs(gap) / need) * 3) + jitter(g.eventId + L.athlete)),
-        `${L.athlete} (${L.teamAbbr}${L.position ? `, ${L.position}` : ""}) is producing ${L.perGame} ${statLabel(L.stat)} per game. Game script ${favMargin > 0 ? "as a favorite" : "as an underdog"} projects ${projection.toFixed(1)} — ${over ? "above" : "below"} the ${line} number.`,
-        { side: over ? "team_over" : "team_under", line, player: L.athlete, stat: L.stat, teamAbbr: L.teamAbbr },
-        ["PROPS", "MEDIC"],
-      ),
-    );
-  }
-
-  return { cands, model };
-}
-
-/** P(X <= k) for a Poisson with mean lambda — used for TD markets. */
-function poissonCdf(k: number, lambda: number): number {
-  const kk = Math.floor(k);
-  let term = Math.exp(-lambda);
-  let sum = term;
-  for (let i = 1; i <= kk; i++) {
-    term *= lambda / i;
-    sum += term;
-  }
-  return Math.min(1, sum);
-}
-
-function fmtLine(v: number): string {
-  const s = Math.abs(v).toFixed(1);
-  return v >= 0 ? `-${s}` : `+${s}`;
-}
-function oppFair(margin: number, sport: string): number {
-  return mlFair(-margin, sport);
-}
-function edgeWhy(model: ModelOut, g: GameInfo, homeSide: boolean): string {
-  const bits: string[] = [];
-  if (model.injNote !== "no confirmed outs on the report") bits.push(`Injuries: ${model.injNote}.`);
-  if (model.restEdge !== 0)
-    bits.push(`Schedule spot adds ${model.restEdge > 0 ? "+" : ""}${model.restEdge.toFixed(1)} to ${g.home.abbr}'s margin.`);
-  bits.push(`${homeSide ? g.home.abbr : g.away.abbr} side holds the gap between model and market.`);
-  return bits.join(" ");
+  return null;
 }
 
 // ---------------------------------------------------------------------------
-// LLM front-end intel (optional — enriches the quantitative core)
-// ---------------------------------------------------------------------------
-
-function digest(g: GameInfo): string {
-  const o = g.odds;
-  return [
-    `${g.sportLabel} | ${g.matchup} | ${g.statusDetail || "scheduled"} | ${g.startTime}`,
-    `${g.away.abbr} ${g.away.record} (road ${g.away.awayRecord || "-"}) @ ${g.home.abbr} ${g.home.record} (home ${g.home.homeRecord || "-"})`,
-    o
-      ? `Lines: spread ${o.details || `${g.home.abbr} ${fmtLine(o.homeSpread ?? 0)}`} | total ${o.overUnder ?? "n/a"} (o${o.overOdds ?? -110}/u${o.underOdds ?? -110}) | ML ${g.away.abbr} ${o.awayML ?? "?"} / ${g.home.abbr} ${o.homeML ?? "?"}${o.homeTeamTotal ? ` | team totals ${g.home.abbr} ${o.homeTeamTotal}, ${g.away.abbr} ${o.awayTeamTotal}` : ""}`
-      : "Lines: none posted",
-    g.injuries.length
-      ? `Injuries: ${g.injuries.slice(0, 8).map((i) => `${i.player} (${i.team}, ${i.status}${i.detail ? ` — ${i.detail}` : ""})`).join("; ")}`
-      : "Injuries: report clean / unavailable",
-    g.rest
-      ? `Rest: ${g.home.abbr} ${g.rest.homeDays}+d${g.rest.homeB2B ? " (B2B)" : ""}${g.rest.home3in4 ? " (3in4)" : ""}${g.rest.homeTravel ? " [away yday]" : ""} | ${g.away.abbr} ${g.rest.awayDays}+d${g.rest.awayB2B ? " (B2B)" : ""}${g.rest.away3in4 ? " (3in4)" : ""}${g.rest.awayTravel ? " [home yday]" : ""}`
-      : "Rest: unknown",
-  ].join("\n");
-}
-
-// ---------------------------------------------------------------------------
-// pipeline orchestration
+// bookkeeping
 // ---------------------------------------------------------------------------
 
 async function trace(runId: number, entry: Omit<TraceEntry, "at">): Promise<void> {
@@ -784,26 +142,83 @@ async function trace(runId: number, entry: Omit<TraceEntry, "at">): Promise<void
   await db.update(runs).set({ trace: next }).where(eq(runs.id, runId));
 }
 
+const COMBAT_SPORTS = new Set(["ufc", "dwcs", "pfl"]);
+const expertKey = (sport: string): string => (COMBAT_SPORTS.has(sport) ? "expert-mma" : `expert-${sport}`);
+const maxUnitsFor = (c: Candidate): number => (c.priceSource === "model" ? MAX_UNITS_MODEL : MAX_UNITS_BOOK);
+
+/**
+ * Credit only the agents that actually backed a pick, so each builds its own
+ * record. (The old code stamped five council agents on every pick, which made
+ * their ratings move in lockstep and say nothing.)
+ */
+export function stampAgents(c: Candidate, health: BucketHealth): string[] {
+  const out = new Set<string>(c.signals);
+  out.add("COMMISSIONER"); // the card's record is the commissioner's record
+  if (c.agree >= 2) out.add("STRATEGA"); // convergence of independent signals
+  if (c.odds > 0 || c.modelProb < 0.5) out.add("CONTRARIAN"); // plus-money / underdog angles
+  const capped = (c.finalUnits ?? 0) >= maxUnitsFor(c) - 1e-9;
+  if (capped || health.stakeMult < 1) out.add("RISK"); // RISK actively limited this stake
+  if (health.n >= 20) out.add("HISTORIAN"); // a measured track record informed the decision
+  return [...out];
+}
+
+// ---------------------------------------------------------------------------
+// the pipeline
+// ---------------------------------------------------------------------------
+
+function summariseIntel(intels: { g: GameInfo; intel: GameIntel }[]): {
+  usable: number;
+  withProjection: number;
+  restSpots: number;
+  injurySpots: number;
+  unchecked: number;
+  rejected: Map<string, number>;
+} {
+  const rejected = new Map<string, number>();
+  let usable = 0;
+  let withProjection = 0;
+  let restSpots = 0;
+  let injurySpots = 0;
+  let unchecked = 0;
+  for (const { g, intel } of intels) {
+    if (intel.usable) {
+      usable++;
+      if (g.context.predictor) withProjection++;
+      if (Math.abs(intel.restAdj) > 0) restSpots++;
+      if (Math.abs(intel.injAdj) > 0) injurySpots++;
+    } else if (intel.reason) {
+      if (/injury report/.test(intel.reason)) unchecked++;
+      const k = intel.reason.replace(/\s*\(.*\)$/, "");
+      rejected.set(k, (rejected.get(k) ?? 0) + 1);
+    }
+  }
+  return { usable, withProjection, restSpots, injurySpots, unchecked, rejected };
+}
+
 export async function runPipeline(
   runId: number,
   keys: KeyBag = {},
   ownerId: string = HOUSE,
   llmEnabled = true,
 ): Promise<void> {
+  const t0 = Date.now();
   const [run] = await db.select().from(runs).where(eq(runs.id, runId));
   if (!run) return;
-  
-  // Always use the HOUSE roster for the shared winrate and global playbooks.
+  const discipline: Discipline = disciplineOf(run.discipline);
+  const cfg = DISCIPLINES[discipline];
+
+  // Always use the HOUSE roster for the shared record and global playbooks.
   await ensureAgentsSeeded(HOUSE);
   const roster = await db.select().from(agents).where(eq(agents.ownerId, HOUSE));
-  const agent = (key: string) => roster.find((a) => a.codename === key || a.agentKey === key);
-  const nowMode = targetFor("scout-quant", keys) ? "llm" : "heuristic";
+  const agentRow = (key: string) => roster.find((a) => a.codename === key || a.agentKey === key);
+  const llmReady = !!targetFor("scout-quant", keys, llmEnabled);
+  const mode = llmReady ? "llm" : "heuristic";
 
   try {
     await trace(runId, {
       layer: "system",
       agent: "KERNEL",
-      message: `Cluster booting — mode: ${nowMode === "llm" ? "LLM swarm online" : "self-hosted quantitative core (no API keys detected)"}. Pulling slate for ${run.slateDate}…`,
+      message: `Cluster booting — ${mode === "llm" ? "LLM reviewers online on top of the quantitative core" : "self-hosted quantitative core (no API keys detected)"}. Discipline: ${cfg.label} (${cfg.hint}). Pulling slate for ${run.slateDate}…`,
       mood: "info",
     });
 
@@ -832,400 +247,185 @@ export async function runPipeline(
       });
     }
     const skipped = games.length - pre.length;
-
     await trace(runId, {
       layer: "system",
       agent: "KERNEL",
-      message: `Slate locked: ${games.length} games found — ${pre.length} queued for analysis${skipped > 0 ? `, ${skipped} skipped (already live or final — the cluster never burns compute on dead games)` : ", zero dead games on the board"}.`,
+      message: `Slate locked: ${games.length} games found — ${pre.length} queued for analysis${skipped > 0 ? `, ${skipped} skipped (already live or final)` : ""}.`,
       mood: "success",
     });
     await db
       .update(runs)
-      .set({ gamesFound: games.length, gamesAnalyzed: pre.length, gamesSkipped: skipped, mode: nowMode })
+      .set({ gamesFound: games.length, gamesAnalyzed: pre.length, gamesSkipped: skipped, mode })
       .where(eq(runs.id, runId));
 
     if (!pre.length) {
-      await trace(runId, {
-        layer: "system",
-        agent: "KERNEL",
-        message: "No upcoming games on this slate. Standing down.",
-        mood: "warn",
-      });
-      await finishRun(runId, ownerId, run.slateDate, { headline: "No active slate", memo: "Every game on the board was already live or final. Pick another date.", avoided: [] }, []);
+      await trace(runId, { layer: "system", agent: "KERNEL", message: "No upcoming games on this slate. Standing down.", mood: "warn" });
+      await finishRun(
+        runId, ownerId, run.slateDate,
+        { headline: "No active slate", memo: "Every game on the board was already live or final. Pick another date.", avoided: [], discipline, noPlay: true, exposure: 0, considered: 0, passed: 0 },
+        [], new Map(),
+      );
       return;
     }
 
     // ---------------- Layer 1: scouts ----------------
-    let candId = 1;
-    const models = new Map<string, ModelOut>();
-    const allCandidates: Candidate[] = [];
     const filter: MarketFilter = buildFilter(run.markets);
-    let filteredOut = 0;
+    let candId = 1;
+    const nextId = () => candId++;
+    const all: Candidate[] = [];
+    const skippedNotes: string[] = [];
+    const intels: { g: GameInfo; intel: GameIntel }[] = [];
+    const bouts = pre.filter((g) => g.combat);
     for (const g of pre) {
-      const { cands, model } = candidatesFor(g, () => candId++);
-      models.set(g.eventId, model);
-      for (const c of cands) {
-        if (allowsCandidate(filter, c.category, c.grade.stat)) allCandidates.push(c);
-        else filteredOut++;
+      if (g.combat) {
+        const r = evaluateBout(g, filter, nextId, discipline);
+        all.push(...r.cands);
+        skippedNotes.push(...r.skipped);
+      } else {
+        const r = evaluateTeamGame(g, filter, nextId);
+        all.push(...r.cands);
+        skippedNotes.push(...r.skipped);
+        intels.push({ g, intel: r.intel });
       }
     }
-    if (!filter.mixed) {
+
+    if (intels.length) {
+      const s = summariseIntel(intels);
+      const why = [...s.rejected].map(([k, n]) => `${n}× ${k}`).join("; ");
+      await trace(runId, { layer: "scout", agent: "QUANT", message: `Market-anchored baseline on ${s.usable}/${intels.length} team games — ${s.withProjection} carry ESPN's independent win projection. Edges are measured against the vig-free price, never against win-loss records.`, mood: "info" });
+      await trace(runId, { layer: "scout", agent: "MEDIC", message: `Injury effects priced on ${s.injurySpots} games${s.unchecked ? `; ${s.unchecked} games passed because their injury report could not be fetched` : ""}.`, mood: s.unchecked ? "warn" : "info" });
+      await trace(runId, { layer: "scout", agent: "CHRONO", message: `${s.restSpots} games with a rest/schedule edge, shrunk to the unpriced remainder.`, mood: "info" });
+      await trace(runId, { layer: "scout", agent: "SHARP", message: `${s.usable} boards validated${why ? `; passed on: ${why}` : ""}.`, mood: why ? "warn" : "success" });
+    }
+    if (bouts.length) {
+      const withStats = bouts.filter((g) => g.combat?.dist.statsUsed).length;
+      const withBook = bouts.filter((g) => g.combat?.priceSource === "espn").length;
       await trace(runId, {
-        layer: "system",
-        agent: "KERNEL",
-        message: `market focus engaged — ${(run.markets ?? []).join(", ")}. ${allCandidates.length} qualifying signal${allCandidates.length === 1 ? "" : "s"} kept, ${filteredOut} off-target angle${filteredOut === 1 ? "" : "s"} discarded before the analysts.`,
-        mood: "info",
+        layer: "scout", agent: "MMA_EXPERT",
+        message: `${bouts.length} bouts priced from one joint model (winner × method × round); fighter stats loaded for ${withStats}/${bouts.length}${withBook ? `; ESPN posted a real moneyline on ${withBook}` : "; no sportsbook price available, so every pick states its fair price and the price floor"}.`,
+        mood: withStats === 0 ? "warn" : "info",
       });
     }
-
-    const slateText = pre.map(digest).join("\n\n");
-
-    const scoutCodes = ["QUANT", "MEDIC", "CHRONO", "SHARP"];
-    for (const code of scoutCodes) {
-      const a = agent(code);
-      const target = llmEnabled && a ? targetFor(a.id, keys, true) : null;
-      const injGames = pre.filter((g) => g.injuries.length > 0);
-      const fatigueGames = pre.filter((g) => g.rest && (g.rest.homeB2B || g.rest.awayB2B || g.rest.home3in4 || g.rest.away3in4));
-      
-      const scope: Record<string, string> = {
-        QUANT: `power lines built for ${pre.length} games — ${allCandidates.filter((c) => c.category === "spread" || c.category === "moneyline").length} model-vs-market edges flagged.${allCandidates.length > 0 ? ` strongest edge: ${allCandidates[0].pick} (${allCandidates[0].edge.toFixed(1)} pts).` : ""}`,
-        MEDIC: injGames.length
-          ? `injury impact priced into ${injGames.length} games: ${injGames.slice(0, 3).map((g) => `${g.matchup} (${g.injuries.length} reported)`).join(", ")}${injGames.length > 3 ? ` +${injGames.length - 3} more` : ""}.`
-          : `no reportable injuries on this slate — all rosters appear intact.`,
-        CHRONO: fatigueGames.length
-          ? `fatigue spots identified: ${fatigueGames.slice(0, 3).map((g) => { const r = g.rest!; return `${g.matchup} (${r.homeB2B ? g.home.abbr + " B2B" : r.awayB2B ? g.away.abbr + " B2B" : r.home3in4 ? g.home.abbr + " 3-in-4" : g.away.abbr + " 3-in-4"})`; }).join(", ")}${fatigueGames.length > 3 ? ` +${fatigueGames.length - 3} more` : ""}.`
-          : `no significant rest or travel edges on this slate.`,
-        SHARP: `${pre.filter((g) => g.odds).length}/${pre.length} games carry posted lines. Key number positions and juice asymmetries noted.`,
-      };
-      
-      let extra = "";
-      if (target && a) {
-        const intel = await llmJson<{ notes?: string }>(
-          target,
-          a.prompt,
-          `SLATE ${run.slateDate}\nReturn JSON {"notes": "…2-4 sentences of your sharpest intel for the analysts…"}.\n\n${slateText.slice(0, 9000)}`,
-          { timeoutMs: 24000 },
-        );
-        if (intel?.notes) extra = ` [${target.label}] ${intel.notes}`;
-      }
-      await trace(runId, {
-        layer: "scout",
-        agent: code,
-        message: `${scope[code]}${extra}`,
-        mood: "info",
-      });
+    if (!filter.mixed && [...filter.categories].some((c) => !COMBAT_CATEGORIES.has(c) && !["spread", "moneyline", "total"].includes(c))) {
+      await trace(runId, { layer: "scout", agent: "PROPS", message: "Derived markets requested. ESPN's free feed has no posted line for these, so every one is a MODEL LINE with a line/price you must beat, held to a higher bar and staked smaller.", mood: "warn" });
     }
 
-    // --- Phase 1.5: Tactical Synthesis (Sport Experts) ---
-    // Experts now review the raw candidates and apply tactical knowledge (pitchers, schemes, cardio).
-    const sportsInSlate = [...new Set(pre.map((g) => g.sport))];
-    for (const sport of sportsInSlate) {
-      const eCode = ["dwcs", "pfl", "ufc"].includes(sport) ? "mma" : sport;
-      const a = agent(`expert-${eCode}`);
-      const target = llmEnabled && a ? targetFor(a.id, keys, true) : null;
-      if (!a) continue;
-
-      const candidatesForSport = allCandidates.filter(c => c.game.sport === sport);
-      let tacticalNotes = "analyzed tactical factors.";
-      
-      if (target && candidatesForSport.length > 0) {
-        const review = await llmJson<{ vetos: number[], boosts: number[], log: string }>(
-          target, a.prompt,
-          `Perform a professional tactical review of these ${sport.toUpperCase()} candidates.\nEvaluate Pitcher/Lineup data, defensive schemes, or fighter styles.\nReturn JSON {"vetos": [ids], "boosts": [ids], "log": "..."}.\n\nCANDIDATES:\n${candidatesForSport.map(c => `#${c.id} ${c.pick} | ${c.thesis}`).join('\n')}`,
-          { timeoutMs: 22000 }
-        );
-        if (review) {
-          (review.vetos || []).forEach(id => {
-            const c = allCandidates.find(x => x.id === id);
-            if (c) { c.confidence -= 20; c.vetoed = "specialist tactical veto"; }
-          });
-          (review.boosts || []).forEach(id => {
-            const c = allCandidates.find(x => x.id === id);
-            if (c) c.confidence += 8;
-          });
-          tacticalNotes = `${review.log} [${target.label}]`;
-        }
-      }
-
-      await trace(runId, {
-        layer: "scout",
-        agent: a.codename,
-        message: `Tactical review for ${sport.toUpperCase()} complete. ${tacticalNotes}`,
-        mood: "info"
-      });
+    // ---------------- Layer 3a: track-record gate ----------------
+    let health: HealthReport;
+    try {
+      health = await loadHealth();
+    } catch {
+      health = { buckets: new Map(), globalBump: 0, overall: { ...NEUTRAL } };
     }
-
-    // PROPS — player props only when a language model is actually online
-    const propsAgent = agent("PROPS");
-    const propsTarget = propsAgent ? targetFor(propsAgent.id, keys) : null;
-    let propCount = 0;
-    if (propsTarget && propsAgent) {
-      interface PropSug { eventIdx: number; player: string; stat: string; direction: "over" | "under"; line: number; why: string }
-      const out = await llmJson<{ props?: PropSug[] }>(
-        propsTarget,
-        propsAgent.prompt,
-        `SLATE ${run.slateDate}\nGames are indexed below starting at 0. stat must be one of PTS, REB, AST, THREES, PASS_YDS, RUSH_YDS, REC_YDS, GOALS, HITS, SHOTS, STRIKEOUTS.\nReturn JSON {"props":[{"eventIdx":0,"player":"Full Name","stat":"PTS","direction":"over","line":24.5,"why":"…"}]} — max 6 total, only high-conviction.\n\n${pre.map((g, i) => `[${i}] ${digest(g)}`).join("\n\n").slice(0, 12000)}`,
-        { timeoutMs: 26000 },
-      );
-      for (const p of out?.props ?? []) {
-        const g = pre[p.eventIdx];
-        if (!g?.injuries && !g) continue;
-        if (!g || !p.player || !p.line || !p.stat) continue;
-        allCandidates.push({
-          id: candId++,
-          game: g,
-          category: "player_prop",
-          pick: `${p.player} ${p.direction} ${p.line} ${statLabel(p.stat)}`,
-          lineLabel: `${p.direction} ${p.line}`,
-          odds: -110,
-          edge: 3,
-          confidence: Math.min(60, 55),
-          signals: ["PROPS", "MEDIC"],
-          thesis: p.why || "Usage angle flagged by PROPS scout.",
-          grade: { side: p.direction === "over" ? "team_over" : "team_under", line: p.line, player: p.player, stat: p.stat },
-        });
-        propCount++;
-      }
-    }
-    // Count player props that were generated from leader data (no LLM needed)
-    const leaderProps = allCandidates.filter((c) => c.category === "player_prop").length;
+    const throttled = [...health.buckets].filter(([, h]) => h.status === "cold" || h.status === "frozen");
     await trace(runId, {
-      layer: "scout",
-      agent: "PROPS",
-      message:
-        propCount + leaderProps > 0
-          ? `surfaced ${leaderProps} leader-data props + ${propCount} LLM props — ${leaderProps + propCount} player angles delivered for council review.`
-          : `no high-conviction player edges cleared the threshold — staying disciplined rather than forcing props.`,
-      mood: propCount + leaderProps > 0 ? "info" : "warn",
+      layer: "council", agent: "HISTORIAN",
+      message: health.overall.n === 0
+        ? "No graded picks from the v5 engine yet — it earns its own track record; older results are not used to judge it."
+        : `v5 track record (28d): ${health.overall.note}.${throttled.length ? ` Throttled: ${throttled.map(([k, h]) => `${k} (${h.status})`).join(", ")}.` : " No bucket is cold."}${health.globalBump ? " Whole engine running cold — raising every bar by 1 point." : ""}`,
+      mood: throttled.length || health.globalBump ? "warn" : "info",
     });
 
-    if (!allCandidates.length) {
-      await trace(runId, {
-        layer: "analyst",
-        agent: "STRATEGA",
-        message: "Zero model-vs-market gaps cleared the edge threshold. This board is priced efficiently — no card tonight.",
-        mood: "warn",
-      });
-      await finishRun(runId, ownerId, run.slateDate, { headline: "Clean board, no edges", memo: "The market priced this slate efficiently. Discipline: no forced bets.", avoided: pre.map((g) => g.matchup).slice(0, 10) }, []);
-      return;
-    }
-
-    // ---------------- Layer 2: analysts ----------------
-    allCandidates.sort((a, b) => b.confidence - a.confidence);
-    const stratega = agent("analyst-stratega") ?? agent("STRATEGA");
-    const strategaTarget = llmEnabled && stratega ? targetFor(stratega.id, keys, true) : null;
-    let strategaDetails = "no LLM used";
-    const top = allCandidates.slice(0, 14);
-    if (strategaTarget && stratega) {
-      interface Verdict { id: number; confidence?: number; thesis?: string }
-      const out = await llmJson<{ verdicts?: Verdict[] }>(
-        strategaTarget,
-        stratega.prompt,
-        `Score/reshape these candidate bets (ids listed). Return JSON {"verdicts":[{"id":1,"confidence":61,"thesis":"…two sentences max…"}]} — keep ids, adjust confidence by at most ±8, only include candidates worth releasing.\n\n${top.map((c) => `#${c.id} ${c.category.toUpperCase()} | ${c.pick} | ${c.game.matchup} | conf ${c.confidence.toFixed(0)} | base thesis: ${c.thesis}`).join("\n").slice(0, 10000)}`,
-        { timeoutMs: 26000 },
-      );
-      for (const v of out?.verdicts ?? []) {
-        const c = allCandidates.find((x) => x.id === v.id);
-        if (!c) continue;
-        if (typeof v.confidence === "number")
-          c.confidence = Math.max(45, Math.min(75, v.confidence));
-        if (v.thesis && v.thesis.length > 20) c.thesis = v.thesis;
-      }
-      const survived = new Set((out?.verdicts ?? []).map((v) => v.id));
-      strategaDetails = out?.verdicts?.map((v: any) => `#${v.id}: ${v.thesis}`).join(" | ") || "theses formulated.";
-      if (survived.size > 0) {
-        for (const c of allCandidates) {
-          if (top.includes(c) && !survived.has(c.id)) {
-            c.confidence -= 15;
-            c.vetoed = "Stratega did not approve for release.";
+    // ---------------- Layer 2: bounded LLM review (optional) ----------------
+    const perGameMax = filter.mixed ? 2 : 3;
+    const common = { discipline, health: health.buckets, globalBump: health.globalBump, perGameMax };
+    if (mode === "llm" && all.length) {
+      const elapsed = Date.now() - t0;
+      if (elapsed > 32_000) {
+        await trace(runId, { layer: "analyst", agent: "STRATEGA", message: "Skipping LLM review — the slate took too long to load to stay inside the host's time limit. The deterministic card stands.", mood: "warn" });
+      } else {
+        const first = selectCard({ cands: all, ...common });
+        const seen = new Set<number>();
+        const shortlist: Candidate[] = [];
+        const add = (c: Candidate) => {
+          if (!seen.has(c.id) && shortlist.length < 18) {
+            seen.add(c.id);
+            shortlist.push(c);
           }
+        };
+        first.card.forEach(add);
+        // A reviewer who trims a released pick can hand its slot to a substitute on the
+        // same angle (e.g. the moneyline for a spread). Every plausible substitute must be
+        // reviewed too, or an unreviewed number would take the slot at full probability.
+        const slotKey = (c: Candidate) => `${c.game.sport}:${c.game.eventId}:${c.cluster}`;
+        const held = new Set(first.card.map(slotKey));
+        all.filter((c) => held.has(slotKey(c)) && c.ev > -0.03).forEach(add);
+        nearMisses(first.rejected, 8).forEach((r) => add(r.c));
+        const byExpert = new Map<string, Candidate[]>();
+        for (const c of shortlist) {
+          const k = expertKey(c.game.sport);
+          byExpert.set(k, [...(byExpert.get(k) ?? []), c]);
         }
-      }
-    } else {
-      // Heuristic synthesis: favor convergence
-      allCandidates.forEach(c => {
-        if (c.signals.length < 3) c.confidence -= 5;
-        if (c.signals.includes("QUANT") && c.edge > 2.5) c.confidence += 4;
-      });
-    }
-
-    await trace(runId, {
-      layer: "analyst",
-      agent: "STRATEGA",
-      message: `synthesis complete — top ${top.length} candidates graded. Reasoning: ${strategaDetails}`,
-      mood: "info",
-    });
-
-    // contrarian audit
-    let vetoCount = 0;
-    for (const c of allCandidates) {
-      if (c.vetoed) continue;
-      const kills: string[] = [];
-      // Heuristic vetos
-      if (c.category === "moneyline" && c.odds < -260) kills.push("excessive juice");
-      if (c.category.startsWith("fight_") && c.odds < -250) kills.push("model price too short");
-      if (c.confidence < 54) kills.push("edge sub-threshold");
-      
-      if (kills.length) {
-        c.vetoed = kills[0];
-        vetoCount++;
-      }
-    }
-
-    const contrarian = agent("CONTRARIAN");
-    const contraTarget = llmEnabled && contrarian ? targetFor(contrarian.id, keys, true) : null;
-    let contraDetails = "system audit applied.";
-
-    if (contraTarget && contrarian && allCandidates.filter(c => !c.vetoed).length > 0) {
-      const active = allCandidates.filter(c => !c.vetoed).slice(0, 12);
-      const out = await llmJson<{ audits?: { id: number, verdict: string, why: string }[] }>(
-        contraTarget,
-        contrarian.prompt,
-        `Audit these candidates. Return JSON {"audits":[{"id":1,"verdict":"CONFIRM|DISCOUNT|VETO","why":"..."}]}.\n\nCANDIDATES:\n${active.map(c => `#${c.id} ${c.pick} | ${c.thesis}`).join('\n')}`,
-        { timeoutMs: 24000 }
-      );
-      if (out?.audits) {
-        out.audits.forEach(adt => {
-          const c = allCandidates.find(x => x.id === adt.id);
-          if (!c) return;
-          if (adt.verdict === "VETO") { c.vetoed = adt.why; vetoCount++; }
-          else if (adt.verdict === "DISCOUNT") { c.confidence -= 8; c.discount = adt.why; }
+        const jobs: ReviewJob[] = [
+          ...[...byExpert].map(([agentId, cands]) => ({ agentId, prompt: agentRow(agentId)?.prompt ?? "", cands })),
+          { agentId: "analyst-stratega", prompt: agentRow("analyst-stratega")?.prompt ?? "", cands: shortlist },
+          { agentId: "analyst-contrarian", prompt: agentRow("analyst-contrarian")?.prompt ?? "", cands: shortlist },
+        ];
+        const { reviews, log } = await collectReviews({ jobs, keys, enabled: llmEnabled, budgetMs: 20_000 });
+        const named: SourcedReview[] = reviews.map((r) => ({ ...r, source: agentRow(r.source)?.codename ?? r.source }));
+        const res = applyReviews(shortlist, named);
+        for (const l of log) {
+          await trace(runId, {
+            layer: l.agentId.startsWith("analyst") ? "analyst" : "scout",
+            agent: agentRow(l.agentId)?.codename ?? l.agentId,
+            message: l.ok ? `Reviewed ${shortlist.length ? "the shortlist" : "nothing"} — ${l.note}${l.ms ? ` (${(l.ms / 1000).toFixed(1)}s)` : ""}.` : `No review this run — ${l.note}.`,
+            mood: l.ok ? "info" : "warn",
+          });
+        }
+        await trace(runId, {
+          layer: "analyst", agent: "STRATEGA",
+          message: `Review applied within hard bounds: ${res.vetoes} veto(es), ${res.trims} probability trim(s), ${res.boosts} small boost(s). Reviewers can't add picks or lines, and can't move a probability more than 5 points down or 2 up.`,
+          mood: res.vetoes ? "warn" : "info",
         });
-        contraDetails = out.audits.filter(a => a.verdict !== "CONFIRM").map(a => `#${a.id} ${a.verdict}: ${a.why}`).join(" | ") || "all candidates confirmed.";
       }
     }
 
-    await trace(runId, {
-      layer: "analyst",
-      agent: "CONTRARIAN",
-      message: `security audit complete. ${vetoCount} vetoed. Details: ${contraDetails}`,
-      mood: vetoCount ? "warn" : "info",
-    });
+    // ---------------- Layer 3b: the council decides ----------------
+    const { card, rejected, exposure } = selectCard({ cands: all, ...common });
+    card.sort((a, b) => b.rank - a.rank);
+    const near = nearMisses(rejected, 6);
+    // Data gaps first: "we skipped this game because intel was missing" is the
+    // most useful thing to tell a person, and must not be crowded out.
+    const avoided = [
+      ...skippedNotes.slice(0, 4),
+      ...near.map((r) => `${r.c.game.matchup}: ${r.c.pick} — ${r.reason}`),
+    ];
 
-    const live = allCandidates.filter((c) => !c.vetoed).sort((a, b) => b.confidence - a.confidence);
+    for (const c of card) {
+      const h = health.buckets.get(c.bucket) ?? NEUTRAL;
+      c.signals = stampAgents(c, h);
+    }
 
-    // ---------------- Layer 3: council ----------------
-    const lessons = await buildLessons();
+    let headline: string;
+    let memo: string;
+    if (card.length) {
+      headline = `${card.length} PLAY${card.length === 1 ? "" : "S"} · ${exposure}u RISKED`;
+      const priced = card.filter((c) => c.priceSource === "model").length;
+      memo = `${card.length} play${card.length === 1 ? "" : "s"} cleared the bar from ${all.length} candidates across ${pre.length} games, risking ${exposure}u of the ${cfg.dailyCap}u ${cfg.label.toLowerCase()} cap. Stakes are quarter-Kelly on the estimated win probability at the real price, rounded down, with 1u = 1% of a 100u bankroll.${priced ? ` ${priced} ${priced === 1 ? "is" : "are"} model-priced: ESPN has no sportsbook number for ${priced === 1 ? "it" : "them"}, so check your book against the stated price floor before betting and log what you actually got in My Bets.` : ""}`;
+    } else {
+      headline = "PASS — NO PLAY CLEARS THE BAR";
+      memo = `${all.length} candidate${all.length === 1 ? "" : "s"} across ${pre.length} games were priced and none cleared the ${cfg.label.toLowerCase()} bar (${(cfg.minEv * 100).toFixed(1)}% expected value after the vig, with independent confirmation). When the number on the screen is fair, the profitable decision is to pass. The closest calls are listed below; Loose discipline lowers the bar if you want more action.`;
+    }
     await trace(runId, {
-      layer: "council",
-      agent: "HISTORIAN",
-      message: lessons.length
-        ? `graded archive review: ${lessons.join(" · ")}.`
-        : "graded archive has too few settled bets for statistical patterns. Will sharpen with volume.",
+      layer: "council", agent: "RISK",
+      message: card.length
+        ? `Sized ${card.length} bets: ${card.map((c) => `${c.finalUnits}u`).join(" + ")} = ${exposure}u (daily cap ${cfg.dailyCap}u, per-game cap 2u, per-bet cap 2u / 1u model-priced).`
+        : "Nothing to size — no candidate earned a stake.",
       mood: "info",
     });
-
-    // Card construction by MARKET FAMILY. A professional card is not eight
-    // spreads — it spans sides, totals, team props, player props and segment
-    // derivatives. Families get reserved chairs before raw edge fills the rest.
-    const familyOf = (cat: string): string =>
-      cat.startsWith("fight_")
-        ? "combat"
-        : cat === "spread" || cat === "moneyline"
-        ? "side"
-        : cat === "total"
-          ? "game_total"
-          : cat === "team_total"
-            ? "team_prop"
-            : cat === "player_prop"
-              ? "player_prop"
-              : "segment_prop";
-    // A balanced card caps each family; when the user has explicitly focused
-    // the run on specific markets, diversity quotas would only starve the card.
-    const FAMILY_CAP: Record<string, number> = filter.mixed
-      ? { side: 4, game_total: 2, team_prop: 2, player_prop: 3, segment_prop: 3, combat: 4 }
-      : { side: 10, game_total: 10, team_prop: 10, player_prop: 10, segment_prop: 10, combat: 10 };
-    const card: Candidate[] = [];
-    const perGame = new Map<string, number>();
-    const perFamily = new Map<string, number>();
-    let exposure = 0;
-    const seat = (c: Candidate): number => {
-      const cost = unitsFor(c);
-      const fam = familyOf(c.category);
-      perGame.set(c.game.eventId, (perGame.get(c.game.eventId) ?? 0) + 1);
-      perFamily.set(fam, (perFamily.get(fam) ?? 0) + 1);
-      c.finalUnits = cost;
-      const eCode = ["dwcs", "pfl", "ufc"].includes(c.game.sport) ? "MMA" : c.game.sport.toUpperCase();
-      c.signals = [...new Set([...c.signals.map(s => s === "MATCHUP" ? `${eCode}_EXPERT` : s), `${eCode}_EXPERT`, "STRATEGA", "CONTRARIAN", "COMMISSIONER", "RISK", "HISTORIAN"])];
-      card.push(c);
-      exposure += cost;
-      return cost;
-    };
-    const eligible = (c: Candidate, budget = 12.05): boolean => {
-      if (card.includes(c)) return false;
-      if ((perGame.get(c.game.eventId) ?? 0) >= (filter.mixed ? 2 : 3)) return false;
-      const fam = familyOf(c.category);
-      if ((perFamily.get(fam) ?? 0) >= (FAMILY_CAP[fam] ?? 3)) return false;
-      return exposure + unitsFor(c) <= budget; // RISK veto on oversize
-    };
-
-    // Phase 1 — the four strongest raw edges anchor the card, but reserve
-    // roughly half the bankroll so alternate markets can still be seated.
-    for (const c of live) {
-      if (card.length >= 4) break;
-      if (eligible(c, filter.mixed ? 7.5 : 12.05)) seat(c);
-    }
-
-    // Phase 2 — one guaranteed chair for every market family with a live edge.
-    const families = filter.mixed
-      ? ["game_total", "player_prop", "team_prop", "segment_prop", "combat", "side"]
-      : [];
-    for (const fam of families) {
-      if (card.length >= 10) break;
-      if ((perFamily.get(fam) ?? 0) > 0) continue;
-      // Walk the family's candidates until one clears game/budget limits —
-      // taking only the single best would forfeit the chair when its game
-      // is already double-booked.
-      const pool = live
-        .filter((c) => familyOf(c.category) === fam)
-        .sort((a, b) => b.confidence - a.confidence);
-      for (const c of pool) {
-        if (eligible(c)) {
-          seat(c);
-          break;
-        }
-      }
-    }
-
-    // Phase 3 — fill remaining chairs by edge, still honouring family caps.
-    for (const c of live) {
-      if (card.length >= 10) break;
-      if (eligible(c)) seat(c);
-    }
-    card.sort((a, b) => b.confidence - a.confidence);
-
-    const commissioner = agent("COMMISSIONER");
-    const commTarget = commissioner ? targetFor(commissioner.id, keys) : null;
-    let decision: CouncilDecision = {
-      headline: card.length ? `${card.length}-play card approved for ${run.slateDate}` : "Council passes — no release",
-      memo: card.length
-        ? `Model-vs-market convergence card. Average confidence ${(card.reduce((s, c) => s + c.confidence, 0) / card.length).toFixed(0)}, spread across ${perGame.size} games, total exposure ${card.reduce((s, c) => s + sealedUnits(c), 0).toFixed(1)}u. ${lessons[0] ? `Board note: ${lessons[0]}.` : ""}`
-        : "Nothing survived the contrarian audit tonight.",
-      avoided: live.slice(card.length, card.length + 8).map((c) => `${c.pick} (${c.game.matchup})`),
-    };
-    if (commTarget && commissioner && card.length) {
-      const out = await llmJson<{ headline?: string; memo?: string }>(
-        commTarget,
-        commissioner.prompt,
-        `Write the card announcement. Return JSON {"headline":"…","memo":"…2 sentences…"}.\nCARD:\n${card.map((c, i) => `${i + 1}. [conf ${c.confidence.toFixed(0)}] ${c.pick} — ${c.game.matchup} — ${c.thesis}`).join("\n").slice(0, 8000)}`,
-        { timeoutMs: 22000 },
-      );
-      if (out?.headline && out?.memo) decision = { ...decision, headline: out.headline, memo: out.memo };
-    }
     await trace(runId, {
-      layer: "council",
-      agent: "COMMISSIONER",
-      message: `council adjourned — official card: ${card.length} bet${card.length === 1 ? "" : "s"}. ${decision.headline}`,
-      mood: "success",
-    });
-    await trace(runId, {
-      layer: "council",
-      agent: "RISK",
-      message: `sizing sealed — ${card.reduce((s, c) => s + sealedUnits(c), 0).toFixed(1)}u total exposure (12u daily cap enforced). Crowns: ${card.filter((c) => sealedUnits(c) >= 1.5).map((c) => c.pick).join(" · ") || "none"}.`,
-      mood: "info",
+      layer: "council", agent: "COMMISSIONER",
+      message: card.length
+        ? `Card released: ${card.map((c) => `${c.pick} (${pct(c.modelProb, 0)} · ${c.priceSource === "model" ? "model price" : `EV ${(c.ev * 100).toFixed(1)}%`})`).join(" | ")}`
+        : "No card released today. This is a decision, not a failure.",
+      mood: card.length ? "success" : "warn",
     });
 
-    await finishRun(runId, ownerId, run.slateDate, decision, card);
+    const decision: CouncilDecision = {
+      headline, memo, avoided,
+      discipline, exposure, considered: all.length, passed: all.length - card.length, noPlay: card.length === 0,
+    };
+    await finishRun(runId, ownerId, run.slateDate, decision, card, health.buckets);
   } catch (err) {
     await trace(runId, {
       layer: "system",
@@ -1233,73 +433,68 @@ export async function runPipeline(
       message: `fault: ${err instanceof Error ? err.message : "unknown"}. Emergency shutdown.`,
       mood: "error",
     });
-    await db
-      .update(runs)
-      .set({ status: "failed", completedAt: new Date() })
-      .where(eq(runs.id, runId));
+    await db.update(runs).set({ status: "failed", completedAt: new Date() }).where(eq(runs.id, runId));
   }
 }
 
-function statLabel(stat: string): string {
-  const map: Record<string, string> = {
-    PTS: "points", REB: "rebounds", AST: "assists", THREES: "threes",
-    PASS_YDS: "pass yards", RUSH_YDS: "rush yards", REC_YDS: "rec yards",
-    GOALS: "goals", HITS: "hits", SHOTS: "shots", STRIKEOUTS: "strikeouts",
-  };
-  return map[stat] ?? stat.toLowerCase();
+// ---------------------------------------------------------------------------
+// persistence
+// ---------------------------------------------------------------------------
+
+/** Stable identity of a wager: same bet on the same game = same key. */
+export function dedupeKeyFor(
+  slateDate: string,
+  c: { game: { sport: string; eventId: string }; category: string; grade: GradeSpec },
+): string {
+  const g = c.grade;
+  // Fight picks used to carry no segment; normalising keeps a v5 pick on the same
+  // wager from being counted twice against one already on the ledger.
+  const seg = g.segment === "FIGHT" ? "FULL" : (g.segment ?? "FULL");
+  const parts = [
+    slateDate,
+    c.game.sport,
+    c.game.eventId,
+    c.category,
+    g.side ?? "",
+    g.line ?? "",
+    g.teamAbbr ?? "",
+    g.player ?? "",
+    g.stat ?? "",
+    seg,
+  ];
+  // Only where side + line don't already identify the wager.
+  const m = g.mma;
+  if (m?.kind === "method") parts.push(`${m.fighter}:${m.method}`);
+  else if (m?.kind === "sigstr" || m?.kind === "td") parts.push(m.fighter);
+  return parts.join("|");
 }
 
-// Sport experts use codename pattern like NHL_EXPERT, MMA_EXPERT
-const SCOUT_CODES = new Set(["QUANT", "MEDIC", "CHRONO", "SHARP", "PROPS"]);
-
-/** Derivatives carry more variance than sides — RISK sizes them down. */
-const REDUCED_SIZE = new Set(["total", "team_total", "player_prop", "1h_total", "1h_spread", "f5_total"]);
-const MIN_SIZE = new Set(["1q_total", "p1_total", "nrfi"]);
-
-function sealedUnits(c: { confidence: number; category: string; signals?: string[]; finalUnits?: number }): number {
-  return c.finalUnits ?? unitsFor(c);
-}
-
-export function unitsFor(c: { confidence: number; category: string; signals?: string[] }): number {
-  const convergence = (c.signals ?? []).filter((s) => SCOUT_CODES.has(s) || s.endsWith("_EXPERT")).length;
-  const u =
-    c.confidence >= 68 && convergence >= 5 ? 2 :
-    c.confidence >= 63 ? 1.5 :
-    c.confidence >= 55 ? 1 : 0.5;
-  if (MIN_SIZE.has(c.category)) return 0.5;
-  return REDUCED_SIZE.has(c.category) ? Math.max(0.5, u - 0.5) : u;
-}
-
-async function finishRun(runId: number, ownerId: string, slateDate: string, decision: CouncilDecision, card: Candidate[]): Promise<void> {
+async function finishRun(
+  runId: number,
+  ownerId: string,
+  slateDate: string,
+  decision: CouncilDecision,
+  card: Candidate[],
+  health: Map<string, BucketHealth>,
+): Promise<void> {
   const repeats: NonNullable<CouncilDecision["repeats"]> = [];
   const carried: number[] = [];
   let released = 0;
 
   for (const c of card) {
     const key = dedupeKeyFor(slateDate, c);
-    // Same wager identity already on this workspace's ledger? Acknowledge it
-    // instead of inserting a clone — a duplicate row would settle a second
-    // time and silently double-count the win or loss.
+    // Same wager identity already on the ledger? Acknowledge it instead of
+    // inserting a clone — a duplicate row would settle a second time and
+    // silently double-count the win or loss.
     const [existing] = await db
-      .select({
-        id: predictions.id,
-        runId: predictions.runId,
-        outcome: predictions.outcome,
-        finalScore: predictions.finalScore,
-      })
+      .select({ id: predictions.id, runId: predictions.runId, outcome: predictions.outcome })
       .from(predictions)
       .where(eq(predictions.dedupeKey, key))
       .limit(1);
 
     if (existing) {
-      // Already staked — show it on this card, but never grade it twice.
       carried.push(existing.id);
-      repeats.push({
-        pick: c.pick,
-        matchup: c.game.matchup,
-        firstRunId: existing.runId,
-        outcome: existing.outcome,
-      });
+      repeats.push({ pick: c.pick, matchup: c.game.matchup, firstRunId: existing.runId, outcome: existing.outcome });
       continue;
     }
 
@@ -1319,11 +514,17 @@ async function finishRun(runId: number, ownerId: string, slateDate: string, deci
         pick: c.pick,
         lineLabel: c.lineLabel,
         odds: c.odds,
-        units: sealedUnits(c),
-        confidence: Math.round(c.confidence * 10) / 10,
-        edge: Math.round(c.edge * 10) / 10,
+        units: c.finalUnits ?? sizeOf(c, health.get(c.bucket) ?? NEUTRAL),
+        // v5: confidence is the estimated WIN PROBABILITY (%), edge is EV per unit (%)
+        confidence: Math.round(c.modelProb * 1000) / 10,
+        edge: Math.round(c.ev * 1000) / 10,
+        modelProb: c.modelProb,
+        marketProb: c.marketProb,
+        priceSource: c.priceSource,
+        minPrice: c.minOdds,
+        engineVersion: ENGINE_VERSION,
         agents: c.signals,
-        reasoning: c.thesis,
+        reasoning: c.discount ? `${c.thesis} Reviewers: ${c.discount}` : c.thesis,
         grade: c.grade,
         outcome: "pending",
       })
@@ -1331,13 +532,7 @@ async function finishRun(runId: number, ownerId: string, slateDate: string, deci
       .onConflictDoNothing()
       .returning({ id: predictions.id });
     if (inserted.length) released++;
-    else
-      repeats.push({
-        pick: c.pick,
-        matchup: c.game.matchup,
-        firstRunId: runId,
-        outcome: "pending",
-      });
+    else repeats.push({ pick: c.pick, matchup: c.game.matchup, firstRunId: runId, outcome: "pending" });
   }
 
   const finalDecision: CouncilDecision = { ...decision, repeats };
@@ -1346,214 +541,139 @@ async function finishRun(runId: number, ownerId: string, slateDate: string, deci
       `${decision.memo} ${repeats.length} of these ${repeats.length + released} selections were already staked on an earlier run — they are shown again here but stay graded once.`.trim();
   }
 
-  // If a run produced ZERO new picks and carried ZERO repeats, it is dead weight.
-  // Delete it entirely rather than cluttering the ledger with empty rows.
-  if (!finalDecision.repeats?.length && released === 0) {
-    await db.delete(runs).where(eq(runs.id, runId));
-    return;
-  }
-
+  // An empty run is KEPT. Under the old forced-ten-picks engine an empty run
+  // meant "nothing happened" and was deleted — but now a pass is a deliberate,
+  // informative result, and deleting it made the client's poll 404 and hang.
   await db
     .update(runs)
     .set({ status: "completed", council: finalDecision, carried, completedAt: new Date() })
     .where(eq(runs.id, runId));
 }
 
-/** Stable identity of a wager: same bet on the same game = same key. */
-function dedupeKeyFor(slateDate: string, c: Candidate): string {
-  const g = c.grade;
-  return [
-    slateDate,
-    c.game.sport,
-    c.game.eventId,
-    c.category,
-    g.side ?? "",
-    g.line ?? "",
-    g.teamAbbr ?? "",
-    g.player ?? "",
-    g.stat ?? "",
-    g.segment ?? "FULL",
-  ].join("|");
-}
-
-async function buildLessons(): Promise<string[]> {
-  const graded = await db
-    .select()
-    .from(predictions)
-    .where(and( ne(predictions.outcome, "pending")))
-    .orderBy(desc(predictions.id))
-    .limit(150);
-  const lessons: string[] = [];
-  const byCat = new Map<string, { w: number; l: number }>();
-  for (const p of graded) {
-    const e = byCat.get(p.category) ?? { w: 0, l: 0 };
-    if (p.outcome === "win") e.w++;
-    else if (p.outcome === "loss") e.l++;
-    byCat.set(p.category, e);
-  }
-  for (const [cat, r] of byCat) {
-    const n = r.w + r.l;
-    if (n < 8) continue;
-    const rate = r.w / n;
-    if (rate >= 0.56) lessons.push(`${cat.replace("_", " ")}s are hitting at ${(rate * 100).toFixed(0)}% (${r.w}-${r.l})`);
-    if (rate <= 0.44) lessons.push(`${cat.replace("_", " ")}s are underperforming at ${(rate * 100).toFixed(0)}% (${r.w}-${r.l}) — tighten edge requirements`);
-  }
-  return lessons.slice(0, 4);
-}
-
 // ---------------------------------------------------------------------------
 // grading engine — settles pending bets against final scores, then pays the
-// agents their rating adjustments (wins/losses ripple through the roster)
+// agents their rating adjustments
 // ---------------------------------------------------------------------------
 
-export async function gradePending(): Promise<{ graded: number; wins: number; losses: number; pushes: number }> {
+/** Legacy (v4) fight rows had no structured market; rebuild it from side/line. */
+export function legacyMma(category: string, g: GradeSpec): MmaGrade | null {
+  if (g.mma) return g.mma;
+  if (category === "fight_ml" && (g.side === "home" || g.side === "away")) return { kind: "ml", fighter: g.side };
+  // side "under" == wagered on a finish, "over" == wagered on a decision
+  if (category === "fight_method") return { kind: "distance", yes: g.side === "over" };
+  if (category === "fight_rounds" && g.line != null && (g.side === "over" || g.side === "under")) {
+    return { kind: "rounds", dir: g.side, line: g.line };
+  }
+  return null;
+}
+
+const STALE_DAYS = 5;
+const STATS_GRACE_DAYS = 3;
+
+export async function gradePending(): Promise<{
+  graded: number;
+  wins: number;
+  losses: number;
+  pushes: number;
+  voided: number;
+}> {
   await ensureSchema();
   const pending = await db
     .select()
     .from(predictions)
-    .where(
-      and(
-        
-        eq(predictions.outcome, "pending"),
-        lt(predictions.startTime, new Date(Date.now() - 45 * 60_000)),
-      ),
-    )
+    .where(and(eq(predictions.outcome, "pending"), lt(predictions.startTime, new Date(Date.now() - 45 * 60_000))))
+    .orderBy(asc(predictions.id))
     .limit(250);
-  if (!pending.length) return { graded: 0, wins: 0, losses: 0, pushes: 0 };
+  const result = { graded: 0, wins: 0, losses: 0, pushes: 0, voided: 0 };
+  if (!pending.length) return result;
 
-  const finalsCache = new Map<string, Awaited<ReturnType<typeof getFinals>>>();
-  let graded = 0, wins = 0, losses = 0, pushes = 0;
-  const creditList: { agents: string[]; outcome: string; confidence: number }[] = [];
+  const finalsCache = new Map<string, FinalScore[]>();
+  const creditList: GradedForRating[] = [];
 
-  for (const p of pending) {
-    const key = `${p.slateDate}|${p.sport}`;
-    if (!finalsCache.has(key)) finalsCache.set(key, await getFinals(p.slateDate, p.sport));
-    const finals = finalsCache.get(key)!;
-    const f = finals.find((x) => x.eventId === p.eventId);
-    if (!f || f.status !== "post") continue;
-
-    const g = p.grade as GradeSpec;
-    let outcome: "win" | "loss" | "push" | null = null;
-
-    // ---- segment (period/half/inning) markets settle off the linescore ----
-    const seg = g.segment ?? "FULL";
-
-    if (seg === "FIGHT" || p.category.startsWith("fight_")) {
-      let fightOutcome: "win" | "loss" | "push" | null = null;
-      if (p.category === "fight_ml") {
-        const pickedHome = g.side === "home";
-        const homeWon = f.homeScore === 1;
-        const awayWon = f.awayScore === 1;
-        if (!homeWon && !awayWon) fightOutcome = "push"; // draw / no contest
-        else fightOutcome = (pickedHome && homeWon) || (!pickedHome && awayWon) ? "win" : "loss";
-      } else if (p.category === "fight_method") {
-        // side "under" == wagered on a finish, "over" == wagered on a decision
-        const went = f.wentDistance === true;
-        fightOutcome = (g.side === "under" && !went) || (g.side === "over" && went) ? "win" : "loss";
-      } else if (p.category === "fight_rounds" && g.line != null) {
-        const elapsed = f.elapsedMinutes ?? 0;
-        const threshold = g.line * 5; // rounds are five minutes
-        if (Math.abs(elapsed - threshold) < 0.02) fightOutcome = "push";
-        else fightOutcome = (elapsed > threshold) === (g.side === "over") ? "win" : "loss";
-      }
-      if (fightOutcome) {
-        const how = f.wentDistance
-          ? "decision"
-          : `R${f.endRound ?? "?"} finish`;
-        const finalScore = `${f.winnerName ?? "result"} def. — ${how}`;
-        await db
-          .update(predictions)
-          .set({ outcome: fightOutcome, finalScore, gradedAt: new Date() })
-          .where(eq(predictions.id, p.id));
-        graded++;
-        if (fightOutcome === "win") wins++;
-        else if (fightOutcome === "loss") losses++;
-        else pushes++;
-        creditList.push({ agents: p.agents, outcome: fightOutcome, confidence: p.confidence });
-      }
-      continue;
-    }
-
-    if (seg !== "FULL") {
-      const slice = (line: number[]): number | null => {
-        if (!line.length) return null;
-        if (seg === "1H") {
-          // NCAAB/soccer-style halves have 2 entries; quarter sports need Q1+Q2
-          return line.length <= 2 ? line[0] : line[0] + line[1];
-        }
-        if (seg === "1Q" || seg === "P1" || seg === "1I") return line[0];
-        if (seg === "F5") return line.slice(0, 5).reduce((s, n) => s + n, 0);
-        return null;
-      };
-      const h = slice(f.homeLine);
-      const a = slice(f.awayLine);
-      if (h == null || a == null) continue; // linescore not published yet
-      if (p.category === "1h_spread" && g.line != null) {
-        const diff = g.side === "home" ? h + g.line - a : a + g.line - h;
-        outcome = diff > 0 ? "win" : diff < 0 ? "loss" : "push";
-      } else if (p.category === "nrfi") {
-        const scored = h + a > 0;
-        // side "under" == NRFI (no runs), "over" == YRFI
-        outcome = (g.side === "under" && !scored) || (g.side === "over" && scored) ? "win" : "loss";
-      } else if (g.line != null) {
-        const tot = h + a;
-        outcome = tot === g.line ? "push" : (tot > g.line) === (g.side === "over") ? "win" : "loss";
-      }
-      if (outcome) {
-        const finalScore = `${f.awayAbbr} ${f.awayScore} — ${f.homeAbbr} ${f.homeScore} (${seg}: ${a}-${h})`;
-        await db
-          .update(predictions)
-          .set({ outcome, finalScore, gradedAt: new Date() })
-          .where(eq(predictions.id, p.id));
-        
-        // Only the canonical (first) instance of a wager credits/blames agents and stats
-        const isDuplicate = await db.select({ id: predictions.id }).from(predictions).where(eq(predictions.dedupeKey, p.dedupeKey)).orderBy(predictions.id).limit(1).then(r => r[0]?.id !== p.id);
-        
-        if (!isDuplicate) {
-            graded++;
-            if (outcome === "win") wins++;
-            else if (outcome === "loss") losses++;
-            else pushes++;
-            creditList.push({ agents: p.agents, outcome, confidence: p.confidence });
-        }
-      }
-      continue;
-    }
-
-    if (p.category === "spread" && g.line != null) {
-      const adjHome = f.homeScore + (g.side === "home" ? g.line : 0);
-      const adjAway = f.awayScore + (g.side === "away" ? g.line : 0);
-      const diff = g.side === "home" ? adjHome - adjAway : adjAway - adjHome;
-      outcome = diff > 0 ? "win" : diff < 0 ? "loss" : "push";
-    } else if (p.category === "total" && g.line != null) {
-      const tot = f.homeScore + f.awayScore;
-      outcome = tot === g.line ? "push" : (tot > g.line) === (g.side === "over") ? "win" : "loss";
-    } else if (p.category === "moneyline") {
-      const homeWon = f.homeScore > f.awayScore;
-      outcome = (homeWon && g.side === "home") || (!homeWon && g.side === "away") ? "win" : "loss";
-    } else if (p.category === "team_total" && g.line != null && g.teamAbbr && !g.player) {
-      const pts = g.teamAbbr === f.homeAbbr ? f.homeScore : f.awayScore;
-      outcome = pts === g.line ? "push" : (pts > g.line) === (g.side === "team_over") ? "win" : "loss";
-    } else if (p.category === "player_prop" && g.player && g.stat && g.line != null) {
-      const val = await lookupPlayerStat(p.sport, p.eventId, g.player, g.stat);
-      if (val == null) continue; // boxscore not parseable yet
-      outcome = val === g.line ? "push" : (val > g.line) === (g.side === "team_over") ? "win" : "loss";
-    }
-    if (!outcome) continue;
-
-    const finalScore = `${f.awayAbbr} ${f.awayScore} — ${f.homeAbbr} ${f.homeScore}`;
+  const record = async (
+    p: (typeof pending)[number],
+    outcome: Outcome,
+    finalScore: string,
+  ): Promise<void> => {
     await db
       .update(predictions)
       .set({ outcome, finalScore, gradedAt: new Date() })
       .where(eq(predictions.id, p.id));
-    graded++;
-    if (outcome === "win") wins++;
-    else if (outcome === "loss") losses++;
-    else pushes++;
-    creditList.push({ agents: p.agents, outcome, confidence: p.confidence });
+    if (outcome === "void") {
+      result.voided++;
+      return;
+    }
+    result.graded++;
+    if (outcome === "win") result.wins++;
+    else if (outcome === "loss") result.losses++;
+    else result.pushes++;
+    // Only the canonical row of a wager credits agents (duplicates are never inserted).
+    creditList.push({ agents: p.agents, outcome, modelProb: p.modelProb, confidence: p.confidence });
+  };
+
+  const ageDays = (p: (typeof pending)[number]): number =>
+    p.startTime ? (Date.now() - p.startTime.getTime()) / 86_400_000 : 0;
+
+  for (const p of pending) {
+    try {
+      const key = `${p.slateDate}|${p.sport}`;
+      if (!finalsCache.has(key)) finalsCache.set(key, await getFinals(p.slateDate, p.sport));
+      const f = finalsCache.get(key)!.find((x) => x.eventId === p.eventId);
+      const g = p.grade as GradeSpec;
+
+      if (!f || f.status !== "post") {
+        // Postponed / cancelled / never reported: refund rather than hang forever.
+        if (ageDays(p) > STALE_DAYS) await record(p, "void", `No result after ${STALE_DAYS} days — voided`);
+        continue;
+      }
+
+      // ---------------- MMA ----------------
+      if (p.category.startsWith("fight_")) {
+        const mma = legacyMma(p.category, g);
+        if (!mma) continue;
+        let stats: FightStatsLike | null = null;
+        if (mma.kind === "sigstr" || mma.kind === "td") {
+          const ref = g.fightRef;
+          const league = (ref?.league ?? f.league ?? "ufc") as "ufc" | "pfl";
+          const cardId = ref?.cardId ?? f.cardId;
+          const awayId = ref?.awayId ?? f.awayId ?? null;
+          const homeId = ref?.homeId ?? f.homeId ?? null;
+          if (cardId && awayId && homeId) {
+            const [a, h] = await Promise.all([
+              fetchFightStatLine(league, cardId, p.eventId, awayId),
+              fetchFightStatLine(league, cardId, p.eventId, homeId),
+            ]);
+            stats = { away: a, home: h };
+          }
+        }
+        const outcome = settleMma(mma, f, stats);
+        if (outcome == null) {
+          if (ageDays(p) > STATS_GRACE_DAYS) {
+            await record(p, "void", "Fight stats were never published by the feed — voided (stake returned)");
+          }
+          continue;
+        }
+        await record(p, outcome, describeFight(f, stats));
+        continue;
+      }
+
+      // ---------------- team sports ----------------
+      let playerValue: number | null | undefined;
+      if (p.category === "player_prop" && g.player && g.stat) {
+        playerValue = await lookupPlayerStat(p.sport, p.eventId, g.player, g.stat);
+      }
+      const settled = settleTeam(p.category, g, f, playerValue);
+      if (!settled) {
+        if (ageDays(p) > STALE_DAYS) await record(p, "void", "Result data never became available — voided");
+        continue;
+      }
+      await record(p, settled.outcome, settled.finalScore);
+    } catch {
+      /* leave it pending; the next sync retries */
+    }
   }
 
-  // settle agent ratings afterwards (drives retraining)
+  // settle agent ratings afterwards
   await settleAgentRatings(creditList);
-  return { graded, wins, losses, pushes };
+  return result;
 }

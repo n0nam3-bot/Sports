@@ -1,36 +1,40 @@
 export const RELEASE = {
-  version: "4.0.0",
-  name: "Global Fleet & Tactical Experts",
-  built: "2026-09-29",
+  version: "5.0.0",
+  name: "Market-Anchored Engine",
+  built: "2026-10-14",
   sports: ["NBA", "NFL", "NCAAF", "NCAAB", "MLB", "NHL", "UFC", "DWCS", "PFL"],
   features: {
-    combatCards: true,
-    fightWinner: true,
-    fightMethod: true,
-    fightRounds: true,
+    // engine
+    marketAnchoredModel: true,
+    vigFreeBaseline: true,
+    noForcedCard: true,
+    fractionalKellyStaking: true,
+    convergenceRequired: true,
+    trackRecordGating: true,
+    boundedLlmReview: true,
+    // MMA
+    mmaJointModel: true,
+    mmaMoneyline: true,
+    mmaTotalRounds: true,
+    mmaGoesDistance: true,
+    mmaStartRound: true,
+    mmaFinishSpread: true,
+    mmaMethodOfVictory: true,
+    mmaSigStrikes: true,
+    mmaTakedowns: true,
+    // product
+    personalBetTracker: true,
+    pricePageProvenance: true,
+    disciplineDial: true,
     marketFocus: true,
-    touchdowns: true,
-    rushingYards: true,
-    receivingYards: true,
     privateWorkspaces: true,
     duplicateProtection: true,
     byoAiKeys: true,
-    modelDropdowns: true,
-    combatModelOdds: true,
-    rerunShowsFullCard: true,
-    globalAgents: true,
-    sportTacticians: true,
-    adminForceImprove: true,
-  },
-  boxing: {
-    enabled: false,
-    reason:
-      "ESPN returns 'Invalid sport (boxing)' and no free feed publishes bout-level schedules, records or results to grade. Shown as unavailable rather than faked.",
   },
   mmaOdds: {
-    source: "model",
+    source: "model (ESPN moneyline used when published)",
     reason:
-      "ESPN's MMA odds endpoint returns zero items for every bout, so UFC/DWCS/PFL prices are the model's own fair numbers and are labelled as such.",
+      "ESPN publishes no sportsbook price for most MMA markets, so UFC/DWCS/PFL picks are model-priced: each states our probability, our fair price and the worst price at which it is still a play. If ESPN does publish a bout moneyline, it is matched to fighters by athlete id and used as a real price.",
   },
 } as const;
 

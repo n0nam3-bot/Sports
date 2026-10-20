@@ -16,10 +16,21 @@ export interface MarketOption {
   stats?: string[];
   /** limits the option to certain sports (empty = all) */
   sports?: string[];
+  /**
+   * combat only: fine-grained market keys this option unlocks (see
+   * `mmaMarketKey`). Lets "Over/Under 1.5" and "Starts Rd 3" be picked
+   * individually rather than as one lump.
+   */
+  keys?: string[];
+  /** combat only: sub-heading the option is shown under */
+  sub?: string;
   group: "core" | "props" | "segments" | "combat";
 }
 
 export const MIXED = "mixed";
+
+const COMBAT = ["ufc", "dwcs", "pfl"];
+const TEAM = ["nba", "nfl", "ncaaf", "ncaab", "mlb", "nhl"];
 
 export const MARKET_OPTIONS: MarketOption[] = [
   // ---- core ----
@@ -28,6 +39,7 @@ export const MARKET_OPTIONS: MarketOption[] = [
     label: "Spreads",
     hint: "point spread / run line / puck line",
     categories: ["spread"],
+    sports: TEAM,
     group: "core",
   },
   {
@@ -35,6 +47,7 @@ export const MARKET_OPTIONS: MarketOption[] = [
     label: "Moneyline",
     hint: "straight-up winners",
     categories: ["moneyline"],
+    sports: TEAM,
     group: "core",
   },
   {
@@ -42,6 +55,7 @@ export const MARKET_OPTIONS: MarketOption[] = [
     label: "Game Totals",
     hint: "over / under the full-game number",
     categories: ["total"],
+    sports: TEAM,
     group: "core",
   },
   {
@@ -49,6 +63,7 @@ export const MARKET_OPTIONS: MarketOption[] = [
     label: "Team Totals",
     hint: "one side's scoring number",
     categories: ["team_total"],
+    sports: TEAM,
     group: "core",
   },
   // ---- player props ----
@@ -188,38 +203,143 @@ export const MARKET_OPTIONS: MarketOption[] = [
   },
   {
     id: "innings",
-    label: "F5 & NRFI",
-    hint: "first five innings, no-run first inning",
-    categories: ["f5_total", "nrfi"],
+    label: "First 5 Innings",
+    // NRFI/YRFI is no longer produced: the old Poisson model was miscalibrated and there is
+    // no free data to price it. Old NRFI rows still grade.
+    hint: "first-five-innings total (model line)",
+    categories: ["f5_total"],
     sports: ["mlb"],
     group: "segments",
   },
   // ---- combat ----
+  // Fight result
   {
     id: "fight_winner",
-    label: "Fight Winner",
-    hint: "moneyline on the bout",
+    label: "Moneyline",
+    hint: "who wins the fight",
     categories: ["fight_ml"],
-    sports: ["ufc", "dwcs", "pfl"],
+    keys: ["ml"],
+    sports: COMBAT,
     group: "combat",
+    sub: "Fight result",
   },
   {
-    id: "fight_method",
-    label: "Method of Victory",
-    hint: "finish vs decision",
-    categories: ["fight_method"],
-    sports: ["ufc", "dwcs", "pfl"],
+    id: "fight_spread",
+    label: "Point Spread",
+    hint: "finish handicap: -1.5 must win by KO/sub, +1.5 wins unless finished",
+    categories: ["fight_spread"],
+    keys: ["spread"],
+    sports: COMBAT,
     group: "combat",
+    sub: "Fight result",
+  },
+  // Total rounds
+  ...[0.5, 1.5, 2.5, 3.5, 4.5].map(
+    (L): MarketOption => ({
+      id: `rounds_${String(L).replace(".", "_")}`,
+      label: `Over / Under ${L}`,
+      hint: L >= 3 ? "only on 5-round fights" : "rounds fought",
+      categories: ["fight_rounds"],
+      keys: [`rounds_${L}`],
+      sports: COMBAT,
+      group: "combat",
+      sub: "Total rounds",
+    }),
+  ),
+  {
+    id: "fight_distance_yes",
+    label: "Goes the distance",
+    hint: "fight does go the full distance",
+    categories: ["fight_distance"],
+    keys: ["distance_yes"],
+    sports: COMBAT,
+    group: "combat",
+    sub: "Total rounds",
   },
   {
-    id: "fight_rounds",
-    label: "Round Totals",
-    hint: "over / under scheduled rounds",
-    categories: ["fight_rounds"],
-    sports: ["ufc", "dwcs", "pfl"],
+    id: "fight_distance_no",
+    label: "Doesn't go the distance",
+    hint: "fight ends inside the distance",
+    categories: ["fight_distance"],
+    keys: ["distance_no"],
+    sports: COMBAT,
     group: "combat",
+    sub: "Total rounds",
+  },
+  ...[2, 3, 4, 5].map(
+    (k): MarketOption => ({
+      id: `fight_start_${k}`,
+      label: `Starts Round ${k}`,
+      hint: k > 3 ? "yes / no · 5-round fights only" : "yes / no",
+      categories: ["fight_start_round"],
+      keys: [`start_${k}`],
+      sports: COMBAT,
+      group: "combat",
+      sub: "Total rounds",
+    }),
+  ),
+  // Winning method
+  {
+    id: "method_dec",
+    label: "Decision",
+    hint: "a named fighter wins on the scorecards",
+    categories: ["fight_method_win"],
+    keys: ["method_dec"],
+    sports: COMBAT,
+    group: "combat",
+    sub: "Winning method",
+  },
+  {
+    id: "method_sub",
+    label: "Submission",
+    hint: "a named fighter wins by submission",
+    categories: ["fight_method_win"],
+    keys: ["method_sub"],
+    sports: COMBAT,
+    group: "combat",
+    sub: "Winning method",
+  },
+  {
+    id: "method_ko",
+    label: "KO / TKO",
+    hint: "a named fighter wins by knockout",
+    categories: ["fight_method_win"],
+    keys: ["method_ko"],
+    sports: COMBAT,
+    group: "combat",
+    sub: "Winning method",
+  },
+  // Volume props
+  {
+    id: "fight_sigstr",
+    label: "Sig. Strikes Landed",
+    hint: "over / under per fighter",
+    categories: ["fight_sigstr"],
+    keys: ["sigstr"],
+    sports: COMBAT,
+    group: "combat",
+    sub: "Fighter props",
+  },
+  {
+    id: "fight_td",
+    label: "Takedowns Landed",
+    hint: "over / under per fighter",
+    categories: ["fight_td"],
+    keys: ["td"],
+    sports: COMBAT,
+    group: "combat",
+    sub: "Fighter props",
   },
 ];
+
+/**
+ * Saved selections from before the MMA catalogue was split up. They expand to
+ * the equivalent granular options so returning users don't lose their picks.
+ */
+const LEGACY_ALIASES: Record<string, string[]> = {
+  fight_rounds: ["rounds_0_5", "rounds_1_5", "rounds_2_5", "rounds_3_5", "rounds_4_5"],
+  fight_method: ["fight_distance_yes", "fight_distance_no"],
+};
 
 export const ALL_MARKET_IDS = MARKET_OPTIONS.map((m) => m.id);
 
@@ -227,29 +347,63 @@ export interface MarketFilter {
   mixed: boolean;
   categories: Set<string>;
   stats: Set<string> | null; // null = any stat allowed
+  /** combat: allowed fine-grained keys; null = every key in an allowed category */
+  keys: Set<string> | null;
 }
 
+/** Every combat bet category (MMA has no sportsbook feed, so all are model-priced). */
+export const COMBAT_CATEGORIES = new Set([
+  "fight_ml",
+  "fight_method",
+  "fight_rounds",
+  "fight_distance",
+  "fight_start_round",
+  "fight_spread",
+  "fight_method_win",
+  "fight_sigstr",
+  "fight_td",
+]);
+
+/**
+ * In "mixed" mode the council only releases markets that have a REAL posted
+ * price (spread / moneyline / game total) plus MMA. Derived markets — team
+ * totals, halves, quarters, F5/NRFI, player props — have no sportsbook line in
+ * our free feed, so their numbers are our own. They are available, but only
+ * when you ask for them explicitly.
+ */
+export const MIXED_CATEGORIES = new Set(["spread", "moneyline", "total", ...COMBAT_CATEGORIES]);
+
 export function buildFilter(selected: string[] | undefined): MarketFilter {
-  const list = (selected ?? []).filter((id) => id !== MIXED);
-  if (!list.length) {
-    return { mixed: true, categories: new Set(), stats: null };
-  }
+  const expanded = (selected ?? [])
+    .filter((id) => id !== MIXED)
+    .flatMap((id) => LEGACY_ALIASES[id] ?? [id]);
   const categories = new Set<string>();
   const stats = new Set<string>();
+  const keys = new Set<string>();
   let anyStatOption = false;
-  for (const id of list) {
+  let anyKeyOption = false;
+  let matched = 0;
+  for (const id of expanded) {
     const opt = MARKET_OPTIONS.find((m) => m.id === id);
     if (!opt) continue;
+    matched++;
     for (const c of opt.categories) categories.add(c);
     if (opt.stats) {
       anyStatOption = true;
       for (const st of opt.stats) stats.add(st);
     }
+    if (opt.keys) {
+      anyKeyOption = true;
+      for (const k of opt.keys) keys.add(k);
+    }
   }
+  // An unrecognised/empty selection must never silently block every pick.
+  if (!matched) return { mixed: true, categories: new Set(), stats: null, keys: null };
   return {
     mixed: false,
     categories,
     stats: anyStatOption ? stats : null,
+    keys: anyKeyOption ? keys : null,
   };
 }
 
@@ -258,14 +412,45 @@ export function allowsCandidate(
   f: MarketFilter,
   category: string,
   stat?: string,
+  key?: string,
 ): boolean {
-  if (f.mixed) return true;
+  if (f.mixed) return MIXED_CATEGORIES.has(category);
   if (!f.categories.has(category)) return false;
   // player props additionally honour the stat-level choice
   if (category === "player_prop" && f.stats) {
     return !!stat && f.stats.has(stat);
   }
+  // combat markets honour the fine-grained choice (e.g. only the 1.5 line)
+  if (COMBAT_CATEGORIES.has(category) && f.keys && key) {
+    return f.keys.has(key);
+  }
   return true;
+}
+
+/**
+ * The fine-grained key of an MMA market, matching `MarketOption.keys`.
+ * Total-rounds and start-round markets are keyed by line / round only, so one
+ * chip covers both the over and the under (or the yes and the no).
+ */
+export function mmaMarketKey(m: import("../db/schema").MmaGrade): string {
+  switch (m.kind) {
+    case "ml":
+      return "ml";
+    case "spread":
+      return "spread";
+    case "rounds":
+      return `rounds_${m.line}`;
+    case "distance":
+      return m.yes ? "distance_yes" : "distance_no";
+    case "start_round":
+      return `start_${m.round}`;
+    case "method":
+      return `method_${m.method}`;
+    case "sigstr":
+      return "sigstr";
+    case "td":
+      return "td";
+  }
 }
 
 /** Options relevant to the sports currently selected. */

@@ -9,7 +9,20 @@ import { sql } from "drizzle-orm";
 let bootstrapped: Promise<void> | null = null;
 
 export function ensureSchema(): Promise<void> {
-  bootstrapped ??= (async () => {
+  if (!bootstrapped) {
+    bootstrapped = runBootstrap().catch((err) => {
+      // A transient failure (e.g. Neon waking from scale-to-zero) must not be
+      // cached: the next request should retry instead of failing until the
+      // server instance is recycled.
+      bootstrapped = null;
+      throw err;
+    });
+  }
+  return bootstrapped;
+}
+
+async function runBootstrap(): Promise<void> {
+  {
     await db.execute(sql`
       CREATE TABLE IF NOT EXISTS "agents" (
         "id" text PRIMARY KEY NOT NULL,
@@ -118,6 +131,51 @@ export function ensureSchema(): Promise<void> {
     await db.execute(sql`
       CREATE INDEX IF NOT EXISTS "runs_owner_idx" ON "runs" ("owner_id", "id" DESC);
     `);
-  })();
-  return bootstrapped;
+
+    // ---- v5: market-anchored engine, price provenance, personal tracker ----
+    await db.execute(sql`
+      ALTER TABLE "predictions" ADD COLUMN IF NOT EXISTS "model_prob" real;
+    `);
+    await db.execute(sql`
+      ALTER TABLE "predictions" ADD COLUMN IF NOT EXISTS "market_prob" real;
+    `);
+    await db.execute(sql`
+      ALTER TABLE "predictions" ADD COLUMN IF NOT EXISTS "price_source" text NOT NULL DEFAULT 'book';
+    `);
+    await db.execute(sql`
+      ALTER TABLE "predictions" ADD COLUMN IF NOT EXISTS "min_price" integer;
+    `);
+    await db.execute(sql`
+      ALTER TABLE "predictions" ADD COLUMN IF NOT EXISTS "engine_version" integer NOT NULL DEFAULT 4;
+    `);
+    await db.execute(sql`
+      ALTER TABLE "runs" ADD COLUMN IF NOT EXISTS "discipline" text NOT NULL DEFAULT 'standard';
+    `);
+    await db.execute(sql`
+      ALTER TABLE "agents" ADD COLUMN IF NOT EXISTS "prompt_version" integer NOT NULL DEFAULT 0;
+    `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS "predictions_pending_idx" ON "predictions" ("outcome", "start_time");
+    `);
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS "user_bets" (
+        "id" serial PRIMARY KEY NOT NULL,
+        "owner_id" text NOT NULL,
+        "prediction_id" integer NOT NULL,
+        "stake" real NOT NULL,
+        "odds" integer NOT NULL,
+        "note" text DEFAULT '' NOT NULL,
+        "result_override" text,
+        "placed_at" timestamp with time zone DEFAULT now() NOT NULL,
+        "updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+        CONSTRAINT "user_bets_prediction_id_predictions_id_fk"
+          FOREIGN KEY ("prediction_id") REFERENCES "public"."predictions"("id")
+          ON DELETE cascade ON UPDATE no action
+      )
+    `);
+    await db.execute(sql`
+      CREATE UNIQUE INDEX IF NOT EXISTS "user_bets_owner_prediction_idx"
+        ON "user_bets" ("owner_id", "prediction_id");
+    `);
+  }
 }
