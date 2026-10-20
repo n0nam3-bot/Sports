@@ -3,9 +3,12 @@ import { db } from "@/db";
 import { predictions, runs } from "@/db/schema";
 import { desc, inArray } from "drizzle-orm";
 import { runPipeline } from "@/lib/engine";
+import { disciplineOf } from "@/lib/discipline";
+import { SPORT_PATHS } from "@/lib/espn";
 import { ensureSchema } from "@/lib/schema";
 import { keysFromRequest, llmEnabledFromRequest } from "@/lib/llm";
 import { ownerFromRequest, adminOwnerId } from "@/lib/owner";
+import { scrub } from "@/lib/scrub";
 
 export const dynamic = "force-dynamic";
 // Serverless safety: background pipelines are killed on freeze, so on
@@ -44,15 +47,17 @@ export async function GET(req: NextRequest) {
 
   return Response.json({
     runs: list.map((r) => {
-      const fresh = (byRun.get(r.id) ?? []).map((p) => ({ ...p, carried: false }));
+      const fresh = (byRun.get(r.id) ?? []).map((p) => ({ ...scrub(p), carried: false }));
       const carried = (r.carried ?? [])
         .map((pid) => byId.get(pid))
         .filter((p): p is (typeof carriedRows)[number] => !!p)
-        .map((p) => ({ ...p, carried: true }));
+        .map((p) => ({ ...scrub(p), carried: true }));
       return {
-        ...r,
+        // never serialise the workspace id: it is the owner's only credential
+        ...scrub(r),
         isViewerRun: r.ownerId === adminOwnerId() && adminOwnerId() !== "",
-        predictions: [...fresh, ...carried].sort((a, b) => b.confidence - a.confidence),
+        // the council's own order (EV-driven), fresh picks before carried ones
+        predictions: [...fresh, ...carried].sort((a, b) => (a.carried === b.carried ? a.sortOrder - b.sortOrder : a.carried ? 1 : -1)),
       };
     }),
   });
@@ -64,8 +69,11 @@ export async function POST(req: NextRequest) {
     sports?: string[];
     markets?: string[];
     includeEvents?: string[];
+    discipline?: string;
   } | null;
-  if (!body?.date || !/^\d{4}-\d{2}-\d{2}$/.test(body.date) || !body.sports?.length) {
+  // Only sports we actually have a feed for (a stale client may still send removed ones).
+  const sports = (body?.sports ?? []).filter((s) => typeof s === "string" && SPORT_PATHS[s]);
+  if (!body?.date || !/^\d{4}-\d{2}-\d{2}$/.test(body.date) || !sports.length) {
     return Response.json({ error: "date + sports required" }, { status: 400 });
   }
   await ensureSchema();
@@ -74,9 +82,10 @@ export async function POST(req: NextRequest) {
     .values({
       ownerId: ownerFromRequest(req),
       slateDate: body.date,
-      sports: body.sports.slice(0, 8),
+      sports: sports.slice(0, 8),
       includeEvents: Array.isArray(body.includeEvents) ? body.includeEvents.slice(0, 400) : [],
-      markets: Array.isArray(body.markets) ? body.markets.slice(0, 20) : [],
+      markets: Array.isArray(body.markets) ? body.markets.slice(0, 40) : [],
+      discipline: disciplineOf(body.discipline),
       status: "running",
     })
     .returning();
