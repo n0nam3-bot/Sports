@@ -1,7 +1,7 @@
 import { db } from "@/db";
 import { predictions, runs } from "@/db/schema";
 import { and, asc, eq, inArray } from "drizzle-orm";
-import { ownerFromRequest } from "@/lib/owner";
+import { scrub } from "@/lib/scrub";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 30;
@@ -13,7 +13,6 @@ export async function GET(
   const { id } = await params;
   const runId = Number(id);
   if (!Number.isFinite(runId)) return Response.json({ error: "bad id" }, { status: 400 });
-  const owner = ownerFromRequest(req);
   const [run] = await db
     .select()
     .from(runs)
@@ -37,9 +36,10 @@ export async function GET(
     : [];
 
   const card = [
-    ...fresh.map((p) => ({ ...p, carried: false })),
-    ...carried.map((p) => ({ ...p, carried: true })),
-  ].sort((a, b) => b.confidence - a.confidence);
+    ...fresh.map((p) => ({ ...scrub(p), carried: false })),
+    ...carried.map((p) => ({ ...scrub(p), carried: true })),
+  ].sort((a, b) => (a.carried === b.carried ? a.sortOrder - b.sortOrder : a.carried ? 1 : -1));
 
-  return Response.json({ run: { ...run, predictions: card } });
+  // never serialise the workspace id: it is the owner's only credential
+  return Response.json({ run: { ...scrub(run), predictions: card } });
 }
