@@ -43,7 +43,12 @@ export async function GET(req: NextRequest) {
   }
 
   // Filter out predictions from runs with no playable picks
-  const playablePreds = preds.filter((p) => p.carried || p.hasEdge);
+  // Only include predictions where the run has noPlay=false and has active picks
+  const activeRuns = publicRuns.filter((r) => r.council.noPlay !== true);
+  if (!activeRuns.length) return Response.json({ runs: [] });
+
+  const activeIds = activeRuns.map((r) => r.id);
+  const playablePreds = preds.filter((p) => activeIds.includes(p.runId));
   if (!playablePreds.length) return Response.json({ runs: [] });
 
   // Build a map of dedupe keys → earliest run that holds the canonical result.
@@ -52,7 +57,7 @@ export async function GET(req: NextRequest) {
     if (!canonicalByKey.has(p.dedupeKey)) canonicalByKey.set(p.dedupeKey, p);
   }
 
-  const byRun = new Map<number, typeof playablePreds>();
+  const byRun = new Map<number, typeof playablePreds[]>();
   for (const p of playablePreds) {
     const arr = byRun.get(p.runId) ?? [];
     arr.push(p);
