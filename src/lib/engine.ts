@@ -318,6 +318,10 @@ export async function runPipeline(
       health = { buckets: new Map(), globalBump: 0, overall: { ...NEUTRAL } };
     }
     const throttled = [...health.buckets].filter(([, h]) => h.status === "cold" || h.status === "frozen");
+    if (throttled.length) {
+      await trace(runId, { layer: "council", agent: "HISTORIAN",
+        message: `Throttle engaged: ${throttled.map(([k, h]) => `${k} (${h.status})`).join(", ")}.`, mood: "warn" });
+    }
     await trace(runId, {
       layer: "council", agent: "HISTORIAN",
       message: health.overall.n === 0
