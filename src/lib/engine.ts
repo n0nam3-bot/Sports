@@ -322,17 +322,20 @@ export async function runPipeline(
       await trace(runId, { layer: "council", agent: "HISTORIAN",
         message: `Throttle engaged: ${throttled.map(([k, h]) => `${k} (${h.status})`).join(", ")}.`, mood: "warn" });
     }
+    // When the engine has no graded picks yet, don't apply the globalBump.
+    // A completely empty track record means the system is new and shouldn't be penalized.
+    const globalBumpToUse = health.overall.n > 0 ? (health.globalBump ?? 0) : 0;
     await trace(runId, {
       layer: "council", agent: "HISTORIAN",
       message: health.overall.n === 0
-        ? "No graded picks from the v5 engine yet — it earns its own track record; older results are not used to judge it."
-        : `v5 track record (28d): ${health.overall.note}.${throttled.length ? ` Throttled: ${throttled.map(([k, h]) => `${k} (${h.status})`).join(", ")}.` : " No bucket is cold."}${health.globalBump ? " Whole engine running cold — raising every bar by 1 point." : ""}`,
+        ? "No graded picks from the v5 engine yet — building a track record."
+        : `v5 track record (28d): ${health.overall.note}.${throttled.length ? ` Throttled: ${throttled.map(([k, h]) => `${k} (${h.status})`).join(", ")}.` : " No bucket is cold."}${health.globalBump ? " Engine running cold — raising every bar by 1 point." : ""}`,
       mood: throttled.length || health.globalBump ? "warn" : "info",
     });
 
     // ---------------- Layer 2: bounded LLM review (optional) ----------------
     const perGameMax = filter.mixed ? 2 : 3;
-    const common = { discipline, health: health.buckets, globalBump: health.globalBump, perGameMax };
+    const common = { discipline, health: health.buckets, globalBump: globalBumpToUse, perGameMax };
     if (mode === "llm" && all.length) {
       const elapsed = Date.now() - t0;
       if (elapsed > 32_000) {
