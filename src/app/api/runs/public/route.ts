@@ -57,7 +57,7 @@ export async function GET(req: NextRequest) {
     if (!canonicalByKey.has(p.dedupeKey)) canonicalByKey.set(p.dedupeKey, p);
   }
 
-  const byRun = new Map<number, typeof playablePreds[]>();
+  const byRun = new Map<number, typeof playablePreds[number][]>();
   for (const p of playablePreds) {
     const arr = byRun.get(p.runId) ?? [];
     arr.push(p);
