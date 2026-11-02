@@ -31,34 +31,19 @@ export async function GET(req: NextRequest) {
   if (!publicRuns.length) return Response.json({ runs: [] });
 
   const ids = publicRuns.map((r) => r.id);
-  let preds: (typeof predictions.$inferSelect)[] = [];
-  try {
-    preds = await db
-      .select()
-      .from(predictions)
-      .where(inArray(predictions.runId, ids));
-  } catch (err) {
-    console.error("Prediction fetch failed:", err);
-    return Response.json({ runs: [] });
-  }
-
-  // Filter out predictions from runs with no playable picks
-  // Only include predictions where the run has noPlay=false and has active picks
-  const activeRuns = publicRuns.filter((r) => r.council.noPlay !== true);
-  if (!activeRuns.length) return Response.json({ runs: [] });
-
-  const activeIds = activeRuns.map((r) => r.id);
-  const playablePreds = preds.filter((p) => activeIds.includes(p.runId));
-  if (!playablePreds.length) return Response.json({ runs: [] });
+  const preds = await db
+    .select()
+    .from(predictions)
+    .where(inArray(predictions.runId, ids));
 
   // Build a map of dedupe keys → earliest run that holds the canonical result.
-  const canonicalByKey = new Map<string, typeof playablePreds[number]>();
-  for (const p of [...playablePreds].sort((a, b) => a.id - b.id)) {
+  const canonicalByKey = new Map<string, typeof preds[number]>();
+  for (const p of [...preds].sort((a, b) => a.id - b.id)) {
     if (!canonicalByKey.has(p.dedupeKey)) canonicalByKey.set(p.dedupeKey, p);
   }
 
-  const byRun = new Map<number, typeof playablePreds[number][]>();
-  for (const p of playablePreds) {
+  const byRun = new Map<number, typeof preds>();
+  for (const p of preds) {
     const arr = byRun.get(p.runId) ?? [];
     arr.push(p);
     byRun.set(p.runId, arr);
