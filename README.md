@@ -6,7 +6,8 @@ fight markets, and a built-in **My Bets** tracker shows *your* unit gain on what
 Dark, neon, gamer/capper UI. Games that already started or finished are never analyzed.
 
 > **Passing is a valid result.** The cluster no longer forces a ten-pick card. If nothing clears the
-> bar it says so, shows the closest calls, and lets you lower the bar (Loose) if you want more action.
+> bar it says so, shows exactly where the slate went (games → priced → candidates → plays), lists the
+> closest calls, publishes any **leans**, and lets you lower the bar (Loose) if you want more action.
 
 ## How a pick is made (engine v5)
 
@@ -31,6 +32,24 @@ Dark, neon, gamer/capper UI. Games that already started or finished are never an
 | Strict | 3.5% | 3 | 5u | 2 |
 | **Standard** | 2.2% | 6 | 8u | 2 |
 | Loose | 1.2% | 10 | 12u | 1 |
+
+### Plays, leans, and "why so few picks?"
+Sportsbook prices are efficient, so on most slates only a handful of games (often none) offer a real edge
+after the vig. Two things keep that from being a black box:
+
+- **Leans.** A candidate with a *small positive* edge that isn't strong or confirmed enough to recommend is
+  published as a **lean** with **no suggested stake**. Leans are graded on their own record and never touch the
+  Ledger's record, P/L, agent ratings or the track-record gating — so over a few weeks you can see, with data,
+  whether the bar is set too high. You can still bet one and log it in My Bets.
+- **The funnel.** Every run shows *how the slate was filtered*: games found → priced → candidates → plays + leans,
+  the best expected value anywhere on the board against the bar, and which games couldn't be priced and why
+  (e.g. "3× injury report not fetched").
+
+For NHL/MLB the feed's puck/run-line prices are asymmetric, so a swapped price could manufacture a fake edge.
+Each ±1.5 side is therefore cross-checked against the same team's moneyline (the team laying −1.5 must be
+*less* likely than that team winning; the team getting +1.5 must be *more* likely), the −1.5 side must be the
+moneyline favourite unless the game is a coin flip, and a puck/run line with a missing price is skipped rather
+than defaulted to −110. A game that fails these checks is passed on entirely.
 
 ### Price provenance — book price vs model price
 Every pick says where its number came from:
