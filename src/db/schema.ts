@@ -43,6 +43,22 @@ export interface CouncilDecision {
   passed?: number;
   /** v5: true when the council deliberately released nothing */
   noPlay?: boolean;
+  /** v5.1: positive-edge candidates below the bar, published with no suggested stake */
+  leans?: number;
+  /** v5.1: where the slate went — makes "why so few picks?" answerable at a glance */
+  funnel?: {
+    games: number;
+    analyzed: number;
+    priced: number;
+    gaps: { reason: string; n: number }[];
+    candidates: number;
+    plays: number;
+    leans: number;
+    /** best expected value among posted-price candidates (a fraction), if any */
+    bestEv: number | null;
+    /** the EV a posted-price play had to clear */
+    bar: number;
+  };
 }
 
 export type BetCategory =
