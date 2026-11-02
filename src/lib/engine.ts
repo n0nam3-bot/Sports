@@ -142,6 +142,9 @@ async function trace(runId: number, entry: Omit<TraceEntry, "at">): Promise<void
   await db.update(runs).set({ trace: next }).where(eq(runs.id, runId));
 }
 
+/** One bettable "angle" on one game: spread and moneyline on a side share a slot. */
+const slotKeyOf = (c: Candidate): string => `${c.game.sport}:${c.game.eventId}:${c.cluster}`;
+
 const COMBAT_SPORTS = new Set(["ufc", "dwcs", "pfl"]);
 const expertKey = (sport: string): string => (COMBAT_SPORTS.has(sport) ? "expert-mma" : `expert-${sport}`);
 const maxUnitsFor = (c: Candidate): number => (c.priceSource === "model" ? MAX_UNITS_MODEL : MAX_UNITS_BOOK);
@@ -222,9 +225,11 @@ export async function runPipeline(
       mood: "info",
     });
 
+    // Every upcoming game needs its own injury report fetched. The old cap of 26 meant that on
+    // a big multi-sport slate the later games were silently passed on for lack of a report.
     const { games, degraded } = await cachedSlate(run.slateDate, run.sports, {
       budgetMs: 16_000,
-      maxInjuryLookups: 26,
+      maxInjuryLookups: 60,
     });
     if (degraded.length) {
       await trace(runId, {
@@ -318,24 +323,17 @@ export async function runPipeline(
       health = { buckets: new Map(), globalBump: 0, overall: { ...NEUTRAL } };
     }
     const throttled = [...health.buckets].filter(([, h]) => h.status === "cold" || h.status === "frozen");
-    if (throttled.length) {
-      await trace(runId, { layer: "council", agent: "HISTORIAN",
-        message: `Throttle engaged: ${throttled.map(([k, h]) => `${k} (${h.status})`).join(", ")}.`, mood: "warn" });
-    }
-    // When the engine has no graded picks yet, don't apply the globalBump.
-    // A completely empty track record means the system is new and shouldn't be penalized.
-    const globalBumpToUse = health.overall.n > 0 ? (health.globalBump ?? 0) : 0;
     await trace(runId, {
       layer: "council", agent: "HISTORIAN",
       message: health.overall.n === 0
-        ? "No graded picks from the v5 engine yet — building a track record."
-        : `v5 track record (28d): ${health.overall.note}.${throttled.length ? ` Throttled: ${throttled.map(([k, h]) => `${k} (${h.status})`).join(", ")}.` : " No bucket is cold."}${health.globalBump ? " Engine running cold — raising every bar by 1 point." : ""}`,
+        ? "No graded picks from the v5 engine yet — it earns its own track record; older results are not used to judge it."
+        : `v5 track record (28d): ${health.overall.note}.${throttled.length ? ` Throttled: ${throttled.map(([k, h]) => `${k} (${h.status})`).join(", ")}.` : " No bucket is cold."}${health.globalBump ? " Whole engine running cold — raising every bar by 1 point." : ""}`,
       mood: throttled.length || health.globalBump ? "warn" : "info",
     });
 
     // ---------------- Layer 2: bounded LLM review (optional) ----------------
     const perGameMax = filter.mixed ? 2 : 3;
-    const common = { discipline, health: health.buckets, globalBump: globalBumpToUse, perGameMax };
+    const common = { discipline, health: health.buckets, globalBump: health.globalBump, perGameMax };
     if (mode === "llm" && all.length) {
       const elapsed = Date.now() - t0;
       if (elapsed > 32_000) {
@@ -354,9 +352,8 @@ export async function runPipeline(
         // A reviewer who trims a released pick can hand its slot to a substitute on the
         // same angle (e.g. the moneyline for a spread). Every plausible substitute must be
         // reviewed too, or an unreviewed number would take the slot at full probability.
-        const slotKey = (c: Candidate) => `${c.game.sport}:${c.game.eventId}:${c.cluster}`;
-        const held = new Set(first.card.map(slotKey));
-        all.filter((c) => held.has(slotKey(c)) && c.ev > -0.03).forEach(add);
+        const held = new Set(first.card.map(slotKeyOf));
+        all.filter((c) => held.has(slotKeyOf(c)) && c.ev > -0.03).forEach(add);
         nearMisses(first.rejected, 8).forEach((r) => add(r.c));
         const byExpert = new Map<string, Candidate[]>();
         for (const c of shortlist) {
@@ -388,9 +385,12 @@ export async function runPipeline(
     }
 
     // ---------------- Layer 3b: the council decides ----------------
-    const { card, rejected, exposure } = selectCard({ cands: all, ...common });
+    const { card, rejected, exposure, leans } = selectCard({ cands: all, ...common });
     card.sort((a, b) => b.rank - a.rank);
-    const near = nearMisses(rejected, 6);
+    // A lean is shown in its own section, so neither it nor a weaker alternative on the same
+    // angle is repeated as a "near miss".
+    const leanSlots = new Set(leans.map(slotKeyOf));
+    const near = nearMisses(rejected.filter((r) => !leanSlots.has(slotKeyOf(r.c))), 6);
     // Data gaps first: "we skipped this game because intel was missing" is the
     // most useful thing to tell a person, and must not be crowded out.
     const avoided = [
@@ -403,6 +403,21 @@ export async function runPipeline(
       c.signals = stampAgents(c, h);
     }
 
+    const priced = intels.filter((x) => x.intel.usable).length + bouts.length;
+    const intelSummary = intels.length ? summariseIntel(intels) : null;
+    const bookEvs = all.filter((c) => c.priceSource === "book").map((c) => c.ev);
+    const funnel: NonNullable<CouncilDecision["funnel"]> = {
+      games: games.length,
+      analyzed: pre.length,
+      priced,
+      gaps: intelSummary ? [...intelSummary.rejected].map(([reason, n]) => ({ reason, n })) : [],
+      candidates: all.length,
+      plays: card.length,
+      leans: leans.length,
+      bestEv: bookEvs.length ? Math.max(...bookEvs) : null,
+      bar: cfg.minEv,
+    };
+
     let headline: string;
     let memo: string;
     if (card.length) {
@@ -410,8 +425,11 @@ export async function runPipeline(
       const priced = card.filter((c) => c.priceSource === "model").length;
       memo = `${card.length} play${card.length === 1 ? "" : "s"} cleared the bar from ${all.length} candidates across ${pre.length} games, risking ${exposure}u of the ${cfg.dailyCap}u ${cfg.label.toLowerCase()} cap. Stakes are quarter-Kelly on the estimated win probability at the real price, rounded down, with 1u = 1% of a 100u bankroll.${priced ? ` ${priced} ${priced === 1 ? "is" : "are"} model-priced: ESPN has no sportsbook number for ${priced === 1 ? "it" : "them"}, so check your book against the stated price floor before betting and log what you actually got in My Bets.` : ""}`;
     } else {
-      headline = "PASS — NO PLAY CLEARS THE BAR";
+      headline = leans.length ? `PASS — NO PLAY · ${leans.length} LEAN${leans.length === 1 ? "" : "S"}` : "PASS — NO PLAY CLEARS THE BAR";
       memo = `${all.length} candidate${all.length === 1 ? "" : "s"} across ${pre.length} games were priced and none cleared the ${cfg.label.toLowerCase()} bar (${(cfg.minEv * 100).toFixed(1)}% expected value after the vig, with independent confirmation). When the number on the screen is fair, the profitable decision is to pass. The closest calls are listed below; Loose discipline lowers the bar if you want more action.`;
+    }
+    if (leans.length) {
+      memo += ` ${leans.length} lean${leans.length === 1 ? " is" : "s are"} below the bar — a small positive edge that isn't strong or confirmed enough to recommend. No stake is suggested; they're graded separately so you can see whether the bar is set right.`;
     }
     await trace(runId, {
       layer: "council", agent: "RISK",
@@ -423,16 +441,17 @@ export async function runPipeline(
     await trace(runId, {
       layer: "council", agent: "COMMISSIONER",
       message: card.length
-        ? `Card released: ${card.map((c) => `${c.pick} (${pct(c.modelProb, 0)} · ${c.priceSource === "model" ? "model price" : `EV ${(c.ev * 100).toFixed(1)}%`})`).join(" | ")}`
-        : "No card released today. This is a decision, not a failure.",
+        ? `Card released: ${card.map((c) => `${c.pick} (${pct(c.modelProb, 0)} · ${c.priceSource === "model" ? "model price" : `EV ${(c.ev * 100).toFixed(1)}%`})`).join(" | ")}${leans.length ? ` — plus ${leans.length} lean${leans.length === 1 ? "" : "s"}, no stake` : ""}`
+        : `No play cleared the bar. ${leans.length ? `${leans.length} lean${leans.length === 1 ? "" : "s"} published with no stake. ` : ""}This is a decision, not a failure.`,
       mood: card.length ? "success" : "warn",
     });
 
     const decision: CouncilDecision = {
       headline, memo, avoided,
       discipline, exposure, considered: all.length, passed: all.length - card.length, noPlay: card.length === 0,
+      leans: leans.length, funnel,
     };
-    await finishRun(runId, ownerId, run.slateDate, decision, card, health.buckets);
+    await finishRun(runId, ownerId, run.slateDate, decision, card, health.buckets, leans);
   } catch (err) {
     await trace(runId, {
       layer: "system",
@@ -483,12 +502,15 @@ async function finishRun(
   decision: CouncilDecision,
   card: Candidate[],
   health: Map<string, BucketHealth>,
+  leans: Candidate[] = [],
 ): Promise<void> {
   const repeats: NonNullable<CouncilDecision["repeats"]> = [];
   const carried: number[] = [];
   let released = 0;
+  const leanSet = new Set(leans.map((c) => c.id));
 
-  for (const c of card) {
+  for (const c of [...card, ...leans]) {
+    const isLean = leanSet.has(c.id);
     const key = dedupeKeyFor(slateDate, c);
     // Same wager identity already on the ledger? Acknowledge it instead of
     // inserting a clone — a duplicate row would settle a second time and
@@ -521,7 +543,8 @@ async function finishRun(
         pick: c.pick,
         lineLabel: c.lineLabel,
         odds: c.odds,
-        units: c.finalUnits ?? sizeOf(c, health.get(c.bucket) ?? NEUTRAL),
+        // a lean carries NO suggested stake; that zero is also how every screen recognises one
+        units: isLean ? 0 : (c.finalUnits ?? sizeOf(c, health.get(c.bucket) ?? NEUTRAL)),
         // v5: confidence is the estimated WIN PROBABILITY (%), edge is EV per unit (%)
         confidence: Math.round(c.modelProb * 1000) / 10,
         edge: Math.round(c.ev * 1000) / 10,
@@ -531,7 +554,7 @@ async function finishRun(
         minPrice: c.minOdds,
         engineVersion: ENGINE_VERSION,
         agents: c.signals,
-        reasoning: c.discount ? `${c.thesis} Reviewers: ${c.discount}` : c.thesis,
+        reasoning: `${isLean ? "LEAN — below the bar, no stake suggested. " : ""}${c.discount ? `${c.thesis} Reviewers: ${c.discount}` : c.thesis}`,
         grade: c.grade,
         outcome: "pending",
       })
@@ -545,7 +568,7 @@ async function finishRun(
   const finalDecision: CouncilDecision = { ...decision, repeats };
   if (repeats.length) {
     finalDecision.memo =
-      `${decision.memo} ${repeats.length} of these ${repeats.length + released} selections were already staked on an earlier run — they are shown again here but stay graded once.`.trim();
+      `${decision.memo} ${repeats.length} of these ${repeats.length + released} selections were already on an earlier run — they are shown again here but stay graded once.`.trim();
   }
 
   // An empty run is KEPT. Under the old forced-ten-picks engine an empty run
@@ -614,8 +637,9 @@ export async function gradePending(): Promise<{
     if (outcome === "win") result.wins++;
     else if (outcome === "loss") result.losses++;
     else result.pushes++;
-    // Only the canonical row of a wager credits agents (duplicates are never inserted).
-    creditList.push({ agents: p.agents, outcome, modelProb: p.modelProb, confidence: p.confidence });
+    // Only the canonical row of a wager credits agents (duplicates are never inserted), and a
+    // lean (no stake) is a shadow pick: it must not move anyone's rating.
+    if (p.units > 0) creditList.push({ agents: p.agents, outcome, modelProb: p.modelProb, confidence: p.confidence });
   };
 
   const ageDays = (p: (typeof pending)[number]): number =>

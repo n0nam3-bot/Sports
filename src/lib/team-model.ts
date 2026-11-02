@@ -174,6 +174,8 @@ function predictorPts(g: GameInfo, sigma: number, pMlHome: number | null): numbe
 // ---------------------------------------------------------------------------
 
 export interface MarketView {
+  /** false when the spread prices are incomplete, so the spread market must be skipped */
+  spreadPriced: boolean;
   pMlHome: number | null;
   /** probability the HOME side covers its posted spread */
   pSpreadHome: number | null;
@@ -184,7 +186,14 @@ export interface MarketView {
 
 export function marketView(g: GameInfo): MarketView {
   const o = g.odds;
-  const view: MarketView = { pMlHome: null, pSpreadHome: null, pOver: null, sharpOk: true, sharpNote: "prices coherent" };
+  const view: MarketView = {
+    spreadPriced: true,
+    pMlHome: null,
+    pSpreadHome: null,
+    pOver: null,
+    sharpOk: true,
+    sharpNote: "prices coherent",
+  };
   if (!o) return { ...view, sharpOk: false, sharpNote: "no posted lines" };
   const problems: string[] = [];
   const book = (a: number, b: number) => impliedProb(a) + impliedProb(b);
@@ -195,11 +204,17 @@ export function marketView(g: GameInfo): MarketView {
     else view.pMlHome = devigTwoWay(o.homeML, o.awayML)[0];
   }
   if (o.homeSpread != null) {
-    const ho = o.homeSpreadOdds ?? -110;
-    const ao = o.awaySpreadOdds ?? -110;
-    const t = book(ho, ao);
-    if (t < 1.0 || t > 1.15) problems.push(`spread prices imply ${(t * 100).toFixed(0)}%`);
-    else view.pSpreadHome = devigTwoWay(ho, ao)[0];
+    if ((o.homeSpreadOdds == null) !== (o.awaySpreadOdds == null)) {
+      // exactly one side priced: a de-vig against an assumed -110 would be meaningless, so
+      // skip just the spread market (the moneyline and total are unaffected)
+      view.spreadPriced = false;
+    } else {
+      const ho = o.homeSpreadOdds ?? -110;
+      const ao = o.awaySpreadOdds ?? -110;
+      const t = book(ho, ao);
+      if (t < 1.0 || t > 1.15) problems.push(`spread prices imply ${(t * 100).toFixed(0)}%`);
+      else view.pSpreadHome = devigTwoWay(ho, ao)[0];
+    }
   }
   if (o.overUnder != null) {
     const ov = o.overOdds ?? -110;
@@ -208,16 +223,39 @@ export function marketView(g: GameInfo): MarketView {
     if (t < 1.0 || t > 1.15) problems.push(`total prices imply ${(t * 100).toFixed(0)}%`);
     else view.pOver = devigTwoWay(ov, un)[0];
   }
-  // spread and moneyline must agree on who the favourite is
+  // Spread and moneyline must agree on who the favourite is. (Skipped for a near coin-flip
+  // moneyline, where books can legitimately hang the -1.5 on either side.)
   if (
     view.pMlHome != null &&
     o.homeSpread != null &&
-    Math.abs(o.homeSpread) >= 2 &&
-    g.sport !== "nhl" &&
-    g.sport !== "mlb"
+    Math.abs(o.homeSpread) >= 1 &&
+    Math.abs(view.pMlHome - 0.5) > 0.04
   ) {
     const spreadFavHome = o.homeSpread < 0;
     if (spreadFavHome !== view.pMlHome > 0.5) problems.push("spread and moneyline disagree on the favourite");
+  }
+  // Puck / run lines (±1.5) have ASYMMETRIC prices, so one swapped or mis-read price would
+  // invent a large fake edge on exactly the bet the engine then stakes the most on. Check each
+  // side against the SAME team's moneyline, which holds however strong the favourite is:
+  //   the team laying -1.5 (must win by 2+) is LESS likely than that team simply winning;
+  //   the team getting +1.5 (win or lose by 1) is MORE likely than that team winning.
+  const lineSport = g.sport === "nhl" || g.sport === "mlb";
+  if (lineSport && o.homeSpread != null && Math.abs(o.homeSpread) === 1.5) {
+    if (o.homeSpreadOdds == null || o.awaySpreadOdds == null) {
+      view.spreadPriced = false; // never default a puck/run-line price to -110
+    } else if (o.homeML != null && o.awayML != null) {
+      const homeLays = o.homeSpread < 0;
+      const laysSpread = homeLays ? o.homeSpreadOdds : o.awaySpreadOdds;
+      const getsSpread = homeLays ? o.awaySpreadOdds : o.homeSpreadOdds;
+      const laysML = homeLays ? o.homeML : o.awayML;
+      const getsML = homeLays ? o.awayML : o.homeML;
+      if (impliedProb(laysSpread) >= impliedProb(laysML) - 0.01) {
+        problems.push("the -1.5 price isn't longer than that team's moneyline (prices may be swapped)");
+      }
+      if (impliedProb(getsSpread) <= impliedProb(getsML) + 0.01) {
+        problems.push("the +1.5 price isn't shorter than that team's moneyline (prices may be swapped)");
+      }
+    }
   }
   if (problems.length) {
     view.sharpOk = false;
@@ -407,7 +445,10 @@ export function evaluateTeamGame(g: GameInfo, filter: MarketFilter, nextId: () =
   const expert = expertOf(sport);
 
   // ---------------- spread ----------------
-  if (o.homeSpread != null && allowsCandidate(filter, "spread")) {
+  if (o.homeSpread != null && !intel.market.spreadPriced) {
+    skipped.push(`${g.matchup}: spread skipped — its prices are incomplete`);
+  }
+  if (o.homeSpread != null && intel.market.spreadPriced && allowsCandidate(filter, "spread")) {
     const line = o.homeSpread;
     const pc = shiftProb(intel.market.pSpreadHome ?? 0.5, intel.dm, P.sigmaMargin);
     const pushP = spreadPush(Math.abs(line), sport);

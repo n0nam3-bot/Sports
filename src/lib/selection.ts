@@ -50,7 +50,21 @@ export interface SelectResult {
   rejected: Rejected[];
   /** total units risked */
   exposure: number;
+  /**
+   * Positive-edge candidates that fell short of the bar. Published with NO suggested
+   * stake and tracked separately, so they add visibility (and a measurable record)
+   * without pretending to be plays.
+   */
+  leans: Candidate[];
 }
+
+/** A lean must still show some positive expected value at a real posted price. */
+export const LEAN_MIN_EV = 0.004;
+/**
+ * Why a candidate was held back, in the cases where holding it back says nothing bad
+ * about its edge: it fell short of the bar, or the card simply had no room.
+ */
+const LEAN_REASONS = /is under the|confirming signals|too thin|card is full|daily risk cap/;
 
 const isCombat = (c: Candidate): boolean => COMBAT_CATEGORIES.has(c.category);
 const isDerived = (c: Candidate): boolean => c.priceSource === "model" && !isCombat(c);
@@ -156,19 +170,47 @@ export function selectCard(input: SelectInput): SelectResult {
     exposure += units;
   }
 
-  return { card, rejected, exposure: Math.round(exposure * 100) / 100 };
+  // ---- leans ----
+  const slotKey = (c: Candidate) => `${c.game.sport}:${c.game.eventId}:${c.cluster}`;
+  const held = new Set(card.map(slotKey));
+  const leans: Candidate[] = [];
+  const pool = rejected
+    .filter(
+      (r) =>
+        LEAN_REASONS.test(r.reason) &&
+        r.c.priceSource === "book" &&
+        !r.c.vetoed &&
+        r.c.ev >= LEAN_MIN_EV &&
+        r.c.modelProb >= 0.5,
+    )
+    .sort((a, b) => b.c.rank - a.c.rank);
+  for (const r of pool) {
+    if (leans.length >= cfg.maxLeans) break;
+    const k = slotKey(r.c);
+    if (held.has(k)) continue; // a better bet on this same angle already exists
+    held.add(k);
+    r.c.finalUnits = 0; // a lean carries no suggested stake
+    leans.push(r.c);
+  }
+
+  return { card, rejected, exposure: Math.round(exposure * 100) / 100, leans };
 }
 
 /**
  * The best candidates that did not make the card, for the council memo.
  * Substantive near-misses (the price/edge wasn't there, a reviewer objected)
  * come first. "A better pick already covers this angle" is redundancy, not a
- * near-miss, so it is only used to fill leftover space.
+ * near-miss, so it is only used to fill leftover space. And a posted-price
+ * candidate that is well below fair value isn't "near" anything, so it is left
+ * out (the funnel already reports the best edge on the whole board).
  */
 const REDUNDANT = /already covers|per-game pick limit|contradicts a stronger/;
+const NOT_NEAR = -0.01;
 
 export function nearMisses(rejected: Rejected[], limit = 6): Rejected[] {
-  const byRank = [...rejected].sort((a, b) => b.c.rank - a.c.rank);
+  const byRank = [...rejected]
+    .filter((r) => !(r.c.priceSource === "book" && r.c.ev < NOT_NEAR))
+    .sort((a, b) => b.c.rank - a.c.rank);
   const substantive = byRank.filter((r) => !REDUNDANT.test(r.reason));
   const redundant = byRank.filter((r) => REDUNDANT.test(r.reason));
   return [...substantive.slice(0, limit), ...redundant.slice(0, Math.max(0, Math.min(2, limit - substantive.length)))];

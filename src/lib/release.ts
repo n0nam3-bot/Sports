@@ -1,7 +1,7 @@
 export const RELEASE = {
-  version: "5.0.0",
+  version: "5.1.0",
   name: "Market-Anchored Engine",
-  built: "2026-10-14",
+  built: "2026-10-25",
   sports: ["NBA", "NFL", "NCAAF", "NCAAB", "MLB", "NHL", "UFC", "DWCS", "PFL"],
   features: {
     // engine
@@ -12,6 +12,9 @@ export const RELEASE = {
     convergenceRequired: true,
     trackRecordGating: true,
     boundedLlmReview: true,
+    leans: true,
+    funnelDiagnostics: true,
+    puckLineIntegrity: true,
     // MMA
     mmaJointModel: true,
     mmaMoneyline: true,

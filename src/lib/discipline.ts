@@ -22,6 +22,8 @@ export interface DisciplineConfig {
   probShift: number;
   /** MMA picks must differ from the division base rate by at least this much */
   minDeviation: number;
+  /** most "leans" (positive but below the bar; no stake suggested) to publish */
+  maxLeans: number;
 }
 
 export const DISCIPLINES: Record<Discipline, DisciplineConfig> = {
@@ -29,34 +31,37 @@ export const DISCIPLINES: Record<Discipline, DisciplineConfig> = {
     id: "strict",
     label: "Strict",
     hint: "fewest picks, highest conviction",
-    minEv: 0.005,
+    minEv: 0.035,
     maxPicks: 3,
     dailyCap: 5,
     minAgree: 2,
     probShift: 0.04,
     minDeviation: 0.06,
+    maxLeans: 3,
   },
   standard: {
     id: "standard",
     label: "Standard",
     hint: "positive EV with confirmation",
-    minEv: 0.005,
+    minEv: 0.022,
     maxPicks: 6,
     dailyCap: 8,
     minAgree: 2,
     probShift: 0,
     minDeviation: 0.04,
+    maxLeans: 5,
   },
   loose: {
     id: "loose",
     label: "Loose",
     hint: "more action, lower bar",
-    minEv: 0.003,
+    minEv: 0.012,
     maxPicks: 10,
     dailyCap: 12,
     minAgree: 1,
     probShift: -0.03,
     minDeviation: 0.03,
+    maxLeans: 6,
   },
 };
 

@@ -21,7 +21,7 @@
  * count, a frozen bucket thaws on its own as old results age out.
  */
 
-import { and, desc, gte, inArray } from "drizzle-orm";
+import { and, desc, gt, gte, inArray } from "drizzle-orm";
 import { db } from "@/db";
 import { predictions } from "@/db/schema";
 import { ensureSchema } from "./schema";
@@ -157,6 +157,7 @@ export async function loadHealth(days = 28): Promise<HealthReport> {
     .where(
       and(
         gte(predictions.engineVersion, 5),
+        gt(predictions.units, 0), // leans carry no stake and are not part of the track record
         gte(predictions.slateDate, cutoff),
         inArray(predictions.outcome, ["win", "loss"]),
       ),

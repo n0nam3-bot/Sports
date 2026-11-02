@@ -265,6 +265,7 @@ async function followAllBaseline(bets: TrackedBet[]): Promise<{ pnl: number; bet
   let n = 0;
   for (const r of rows) {
     if (r.outcome !== "win" && r.outcome !== "loss" && r.outcome !== "push") continue;
+    if (r.units <= 0) continue; // a lean has no suggested stake to "follow"
     n++;
     pnl += settledProfit(r.outcome, r.units, r.odds);
   }
