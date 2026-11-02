@@ -232,3 +232,70 @@ test("injuries are attributed to the right team: overlapping abbreviations never
   assert.ok(readGame(swapped).injAdj < 0, "and it hurts LAL when LAL is at home");
   assert.ok(Math.abs(readGame(g).injAdj + readGame(swapped).injAdj) < 1e-9, "symmetric");
 });
+
+// ---------------------------------------------------------------------------
+// NHL / MLB puck- and run-line integrity
+// ---------------------------------------------------------------------------
+const nhl = (o: Partial<ReturnType<typeof odds>>) =>
+  teamGame({
+    sport: "nhl",
+    rest: rest(),
+    odds: odds({ homeSpread: -1.5, overUnder: 6, ...o }),
+  });
+
+test("NHL puck line: a correctly-oriented board is accepted", () => {
+  const g = nhl({ homeSpreadOdds: 170, awaySpreadOdds: -210, homeML: -180, awayML: 155 });
+  const v = marketView(g);
+  assert.equal(v.sharpOk, true, v.sharpNote);
+  assert.equal(v.spreadPriced, true);
+});
+
+test("NHL puck line: a heavy favourite whose -1.5 price is legitimately NEGATIVE is still accepted", () => {
+  // ML -400 (80%) → laying 1.5 is ~60%: -150. No false alarm on lopsided games.
+  const g = nhl({ homeSpreadOdds: -150, awaySpreadOdds: 130, homeML: -400, awayML: 320 });
+  const v = marketView(g);
+  assert.equal(v.sharpOk, true, v.sharpNote);
+});
+
+test("NHL puck line: swapped prices are caught before they can manufacture a fake edge", () => {
+  // Home lays -1.5 but the prices are attached the wrong way round.
+  const g = nhl({ homeSpreadOdds: -210, awaySpreadOdds: 170, homeML: -180, awayML: 155 });
+  const v = marketView(g);
+  assert.equal(v.sharpOk, false);
+  assert.match(v.sharpNote, /swapped/);
+  const r = evaluateTeamGame(g, mixed, idGen());
+  assert.equal(r.cands.length, 0, "a game with suspect prices is passed on entirely");
+  // MLB run line gets the same protection
+  const mlb = teamGame({ sport: "mlb", rest: rest(), odds: odds({ homeSpread: -1.5, homeSpreadOdds: -200, awaySpreadOdds: 165, homeML: -150, awayML: 130, overUnder: 8.5 }) });
+  assert.equal(marketView(mlb).sharpOk, false);
+});
+
+test("NHL: the -1.5 side must be the moneyline favourite, unless the game is a coin flip", () => {
+  const bad = nhl({ homeSpreadOdds: 170, awaySpreadOdds: -210, homeML: 160, awayML: -190 });
+  assert.equal(marketView(bad).sharpOk, false);
+  assert.match(marketView(bad).sharpNote, /disagree on the favourite/);
+  // a coin-flip moneyline can legitimately hang the -1.5 on either side
+  const flip = nhl({ homeSpreadOdds: 190, awaySpreadOdds: -230, homeML: -105, awayML: -105 });
+  assert.equal(marketView(flip).sharpOk, true, marketView(flip).sharpNote);
+});
+
+test("a puck line with only ONE price is skipped (never defaulted to -110), but the moneyline is still priced", () => {
+  const g = nhl({ homeSpreadOdds: 170, awaySpreadOdds: null, homeML: -180, awayML: 155 });
+  assert.equal(marketView(g).spreadPriced, false);
+  const r = evaluateTeamGame(g, mixed, idGen());
+  assert.ok(!r.cands.some((c) => c.category === "spread"), "spread skipped");
+  assert.ok(r.cands.some((c) => c.category === "moneyline"), "moneyline still evaluated");
+  assert.match(r.skipped.join(" "), /spread skipped/);
+});
+
+test("an NHL slate with a tired road team: honest probabilities, nothing absurd", () => {
+  // Away team on a back-to-back with travel: the biggest believable NHL rest edge.
+  const g = nhl({ homeSpreadOdds: 170, awaySpreadOdds: -210, homeML: -150, awayML: 130 });
+  g.rest = rest({ awayB2B: true, awayTravel: true, homeDays: 2 });
+  const { cands } = evaluateTeamGame(g, mixed, idGen());
+  for (const c of cands) {
+    assert.ok(c.modelProb > 0.05 && c.modelProb < 0.95);
+    // the edge from rest alone is small in hockey: nothing should look like a 10%+ EV windfall
+    assert.ok(c.ev < 0.08, `${c.category} EV ${(c.ev * 100).toFixed(1)}% looks too good to be true`);
+  }
+});

@@ -19,5 +19,17 @@ Object.defineProperty(state, "phase", {
   },
   set() {},
 });
+// touch /tmp/fake-lean to add a game with a small, unconfirmed edge (a "lean")
+Object.defineProperty(state, "leanGame", {
+  get() {
+    try {
+      readFileSync("/tmp/fake-lean");
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  set() {},
+});
 installFakeEspn(state);
 console.log(`[fake-espn] installed for ${D}`);

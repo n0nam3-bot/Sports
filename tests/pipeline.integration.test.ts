@@ -167,7 +167,7 @@ test("re-running the same slate never duplicates a wager", async () => {
   assert.equal(r.status, "completed");
   assert.equal(r.carried.length, before.length, "every selection is acknowledged as carried");
   assert.equal(r.council!.repeats!.length, before.length);
-  assert.match(r.council!.memo, /already staked on an earlier run/);
+  assert.match(r.council!.memo, /already on an earlier run/);
 });
 
 test("focused MMA selections return exactly the markets asked for, with structured grades", async () => {
@@ -290,6 +290,78 @@ test("a broken or unreachable LLM changes nothing: the deterministic card stands
 });
 
 // ---------------------------------------------------------------------------
+test("leans: a sub-bar edge is published with NO stake, and never touches ratings, track record or the follow-everything baseline", async () => {
+  state.leanGame = true;
+  await db.delete(userBets);
+  await db.delete(predictions);
+  const id = await newRun(["nba", "pfl"]); // a sports key no earlier test used (the slate cache is keyed by it)
+  await runPipeline(id, {}, OWNER, false);
+  const r = await runRow(id);
+  assert.equal(r.status, "completed");
+
+  const ps = await allPreds();
+  const plays = ps.filter((p) => p.units > 0);
+  const leans = ps.filter((p) => p.units === 0);
+  assert.deepEqual(plays.map((p) => p.pick), ["Boston Celtics -4.5"], "the stacked edge is still a play");
+  assert.equal(leans.length, 1);
+  const lean = leans[0];
+  assert.equal(lean.pick, "Sacramento Kings ML");
+  assert.equal(lean.priceSource, "book");
+  assert.equal(lean.units, 0, "a lean carries no stake");
+  assert.match(lean.reasoning, /^LEAN — below the bar/);
+  assert.ok(lean.edge > 0.4 && lean.edge < 2.2, `EV ${lean.edge}% sits between the lean floor and the play bar`);
+  assert.ok(lean.modelProb! > 0.55 && lean.modelProb! < 0.65);
+  for (const council of ["COMMISSIONER", "RISK", "STRATEGA", "HISTORIAN", "CONTRARIAN"]) {
+    assert.ok(!lean.agents.includes(council), `${council} did not approve a lean`);
+  }
+
+  // the council tells the story, including where the slate went
+  assert.equal(r.council!.leans, 1);
+  assert.equal(r.council!.noPlay, false);
+  assert.match(r.council!.memo, /1 lean is below the bar/);
+  const f = r.council!.funnel!;
+  assert.equal(f.games, 4);
+  assert.equal(f.priced, 3, "the unchecked-injury game could not be priced");
+  assert.deepEqual(f.gaps.map((g) => g.n), [1]);
+  assert.match(f.gaps[0].reason, /injury report not fetched/);
+  assert.equal(f.plays, 1);
+  assert.equal(f.leans, 1);
+  assert.ok(f.bestEv! > f.bar, "the best candidate on the board cleared the bar (the BOS play)");
+  assert.equal(f.bar, 0.022);
+  assert.equal(r.council!.exposure, plays[0].units, "leans add no risk");
+  assert.ok(!r.council!.avoided.some((a) => /Kings/.test(a)), "a lean is not repeated as a near-miss");
+
+  // ---- grading: the lean is graded, but is invisible to every statistic that is about staked plays ----
+  const quant = async () => (await listAgents("house")).find((a) => a.codename === "QUANT")!;
+  const before = await quant();
+  await db.update(predictions).set({ startTime: new Date(Date.now() - 3 * 3600_000) });
+  state.phase = "final";
+  const res = await gradePending();
+  state.phase = "pre";
+  assert.equal(res.graded, 2);
+  const graded = await allPreds();
+  assert.equal(graded.find((p) => p.units === 0)!.outcome, "win", "SAC 108-104 → the lean won");
+  assert.equal(graded.find((p) => p.units > 0)!.outcome, "win");
+  const after = await quant();
+  assert.equal(after.wins - before.wins, 1, "only the staked BOS play credited QUANT; the lean did not");
+
+  const { loadHealth } = await import("../src/lib/health");
+  const health = await loadHealth();
+  const nbaMl = health.buckets.get("nba:moneyline");
+  assert.ok(!nbaMl || nbaMl.n === 0, "a lean is not part of the track record");
+  assert.equal(health.overall.n, 1, "the track record counts the staked play only");
+
+  // the tracker's follow-everything baseline ignores leans too (there is no stake to follow)
+  const bos = graded.find((p) => p.units > 0)!;
+  await upsertBet(OWNER, { predictionId: bos.id, stake: 1, odds: -110 });
+  await upsertBet(OWNER, { predictionId: lean.id, stake: 0.25, odds: -140 }); // a person may still bet a lean
+  const { summary } = await listBets(OWNER);
+  assert.equal(summary.total, 2);
+  assert.equal(summary.followAllBets, 1, "baseline = staked plays only");
+  assert.equal(summary.wins, 2, "…but the person's own bet on a lean counts in THEIR record");
+  state.leanGame = false; // (kept on until here: the fake's final scoreboard needs the game too)
+});
+
 test("grading: every released pick settles correctly against the final scores", async () => {
   // rebuild a rich card: the default card + one focused run per MMA family
   await db.delete(userBets);

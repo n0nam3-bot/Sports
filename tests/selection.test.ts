@@ -5,7 +5,7 @@ import { bucketOf } from "../src/lib/candidate";
 import { DISCIPLINES } from "../src/lib/discipline";
 import { evPerUnit } from "../src/lib/edge";
 import { computeHealth, zScore, type BucketHealth } from "../src/lib/health";
-import { PER_GAME_CAP, selectCard, sizeOf } from "../src/lib/selection";
+import { nearMisses, PER_GAME_CAP, selectCard, sizeOf } from "../src/lib/selection";
 import { teamGame } from "./helpers";
 
 let n = 0;
@@ -208,4 +208,84 @@ test("the whole engine running cold raises everyone's bar", () => {
   const rep = computeHealth(bad);
   assert.equal(rep.globalBump, 0.01);
   assert.equal(computeHealth(rows(28, 22)).globalBump, 0);
+});
+
+// ---------------------------------------------------------------------------
+// leans
+// ---------------------------------------------------------------------------
+test("leans: a real but sub-bar edge is published with NO stake; no edge → nothing", () => {
+  // standard needs 2.2% EV. 53.5% at -110 is +2.1% (a lean); 52% is negative (nothing).
+  const lean = cand({ modelProb: 0.535, gameId: "L1" });
+  const none = cand({ modelProb: 0.52, gameId: "L2" });
+  const tiny = cand({ modelProb: 0.5245, gameId: "L3" }); // +0.1% EV: below even the lean floor
+  const r = selectCard({ cands: [lean, none, tiny], discipline: "standard" });
+  assert.equal(r.card.length, 0);
+  assert.deepEqual(r.leans.map((c) => c.id), [lean.id]);
+  assert.equal(r.leans[0].finalUnits, 0, "a lean carries no suggested stake");
+  assert.ok(r.exposure === 0, "leans add no risk to the card");
+});
+
+test("leans: never an angle a play already covers, and one lean per angle", () => {
+  const play = cand({ modelProb: 0.58, gameId: "G", cluster: "side" });
+  const sameAngle = cand({ modelProb: 0.535, gameId: "G", cluster: "side", category: "moneyline", bucket: bucketOf("nba", "moneyline") });
+  const otherAngle = cand({ modelProb: 0.535, gameId: "G", cluster: "total", category: "total", bucket: bucketOf("nba", "total") });
+  const twinA = cand({ modelProb: 0.534, gameId: "H", cluster: "side" });
+  const twinB = cand({ modelProb: 0.532, gameId: "H", cluster: "side", category: "moneyline", bucket: bucketOf("nba", "moneyline") });
+  const r = selectCard({ cands: [play, sameAngle, otherAngle, twinA, twinB], discipline: "standard" });
+  assert.deepEqual(r.card.map((c) => c.id), [play.id]);
+  const ids = r.leans.map((c) => c.id);
+  assert.ok(!ids.includes(sameAngle.id), "the play already covers this angle");
+  assert.ok(ids.includes(otherAngle.id), "a different angle on the same game can be a lean");
+  assert.equal(ids.filter((i) => i === twinA.id || i === twinB.id).length, 1, "one lean per angle");
+  assert.ok(ids.includes(twinA.id), "the stronger twin is the one kept");
+});
+
+test("leans: capped per discipline and ranked best-first", () => {
+  const many = Array.from({ length: 12 }, (_, i) => cand({ modelProb: 0.53 + (i % 4) * 0.001, gameId: `LN${i}` }));
+  for (const [d, cap] of [["strict", 3], ["standard", 5], ["loose", 6]] as const) {
+    const r = selectCard({ cands: many.map((c) => ({ ...c })), discipline: d });
+    assert.ok(r.leans.length <= cap, `${d}: ${r.leans.length} leans`);
+  }
+  const r = selectCard({ cands: many, discipline: "standard" });
+  const ranks = r.leans.map((c) => c.rank);
+  assert.deepEqual([...ranks].sort((a, b) => b - a), ranks);
+});
+
+test("leans: only posted-price picks that are not vetoed or paused", () => {
+  const model = cand({ modelProb: 0.535, priceSource: "model", category: "team_total", bucket: bucketOf("nba", "team_total"), gameId: "M1" });
+  const vetoed = cand({ modelProb: 0.535, vetoed: "star ruled out", gameId: "M2" });
+  const pausedKey = bucketOf("nba", "total");
+  const paused = cand({ modelProb: 0.535, bucket: pausedKey, category: "total", cluster: "total", gameId: "M3" });
+  const health = new Map([[pausedKey, { n: 40, wins: 10, expected: 20, z: -3, status: "frozen" as const, stakeMult: 0, evBump: 0.03, note: "cold" }]]);
+  const r = selectCard({ cands: [model, vetoed, paused], discipline: "loose", health });
+  assert.deepEqual(r.leans, [], "model-priced, vetoed and frozen candidates are not leans");
+});
+
+test("leans: a pick that cleared the bar but did not fit on the card becomes a lean", () => {
+  // strict allows 3 picks. Four ~1u picks all clear the 3.5% bar; the 4th has real edge but no room.
+  const picks = [0.546, 0.545, 0.544, 0.543].map((p, i) => cand({ modelProb: p, gameId: `FULL${i}` }));
+  const r = selectCard({ cands: picks, discipline: "strict" });
+  assert.equal(r.card.length, 3);
+  assert.equal(r.leans.length, 1);
+  assert.equal(r.leans[0].finalUnits, 0);
+  assert.ok(r.leans[0].ev > 0.035, "it genuinely had the edge — it just did not fit");
+  assert.match(r.rejected.find((x) => x.c.id === r.leans[0].id)!.reason, /card is full/);
+
+  // the daily risk cap can do the same: ~2u picks hit strict's 5u cap after two
+  const big = [0.6, 0.599, 0.598].map((p, i) => cand({ modelProb: p, gameId: `CAP${i}` }));
+  const r2 = selectCard({ cands: big, discipline: "strict" });
+  assert.equal(r2.card.length, 2);
+  assert.equal(r2.exposure, 4);
+  assert.equal(r2.leans.length, 1);
+  assert.match(r2.rejected.find((x) => x.c.id === r2.leans[0].id)!.reason, /daily risk cap/);
+});
+
+test("near-misses: a candidate far below fair value is not a 'near' miss", () => {
+  const near = cand({ modelProb: 0.515, gameId: "N1" }); // EV about -1.7%?  (just outside the cut)
+  const close = cand({ modelProb: 0.523, gameId: "N2" }); // essentially break-even
+  const awful = cand({ modelProb: 0.45, gameId: "N3" }); // EV about -14%
+  const r = selectCard({ cands: [near, close, awful], discipline: "standard" });
+  const shown = nearMisses(r.rejected, 6).map((x) => x.c.id);
+  assert.ok(shown.includes(close.id), "break-even is a genuine near-miss");
+  assert.ok(!shown.includes(awful.id), "−14% EV is not near anything");
 });

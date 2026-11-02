@@ -16,6 +16,8 @@ export interface FakeState {
   fightStats: boolean;
   /** event ids whose per-game summary 404s (injury report "never fetched") */
   failSummary: Set<string>;
+  /** add a fourth NBA game with a real-but-small edge (a "lean", not a play) */
+  leanGame: boolean;
   /** every URL requested, for assertions */
   log: string[];
   /** plays the LLM provider (OpenRouter). Return the model's text, or null to fail the call. */
@@ -32,6 +34,7 @@ export function newState(date: string): FakeState {
     mmaMoneyline: false,
     fightStats: true,
     failSummary: new Set(["401003"]),
+    leanGame: false,
     log: [],
     llmCalls: [],
   };
@@ -116,11 +119,22 @@ const LAL: TeamSpec = { id: "13", abbr: "LAL", name: "Los Angeles Lakers", total
 const DEN: TeamSpec = { id: "7", abbr: "DEN", name: "Denver Nuggets", total: "20-20" };
 const MIA: TeamSpec = { id: "14", abbr: "MIA", name: "Miami Heat", total: "20-20" };
 const CHI: TeamSpec = { id: "4", abbr: "CHI", name: "Chicago Bulls", total: "20-20" };
+const SAC: TeamSpec = { id: "23", abbr: "SAC", name: "Sacramento Kings", total: "20-20" };
+const PHX: TeamSpec = { id: "21", abbr: "PHX", name: "Phoenix Suns", total: "20-20" };
 const WAS: TeamSpec = { id: "27", abbr: "WAS", name: "Washington Wizards", total: "10-30" };
 
 function nbaBoard(s: FakeState) {
   const fin = s.phase === "final";
+  const lean = s.leanGame
+    ? [
+        // E4: ESPN's projection likes SAC more than the market does, and NOTHING else confirms it:
+        // a small positive edge (~+1.3% EV) that is below the bar and unconfirmed → a lean.
+        nbaEvent("401004", SAC, PHX, s.date, odds("SAC", -2.5, 224.5, -140, 120),
+          fin ? { home: 108, away: 104, homeLine: [27, 27, 27, 27], awayLine: [26, 26, 26, 26] } : undefined),
+      ]
+    : [];
   return [
+    ...lean,
     // E1: BOS (-4.5) host a NYK team on the second night of a back-to-back, missing two players,
     // while ESPN's own projection likes BOS far more than the market does.
     nbaEvent("401001", BOS, NYK, s.date, odds("BOS", -4.5, 221.5, -190, 160),
@@ -156,6 +170,13 @@ function summaryFor(id: string, s: FakeState) {
         },
       ],
       predictor: { homeTeam: { gameProjection: "78.0" }, awayTeam: { gameProjection: "22.0" } },
+      boxscore: { players: [] },
+    };
+  }
+  if (id === "401004") {
+    return {
+      injuries: [],
+      predictor: { homeTeam: { gameProjection: "70.0" }, awayTeam: { gameProjection: "30.0" } },
       boxscore: { players: [] },
     };
   }
