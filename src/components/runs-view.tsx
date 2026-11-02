@@ -81,7 +81,7 @@ export default function RunsView({
         (r) =>
           r.predictions.some((p) => (engine === "v5" ? isV5(p) : !isV5(p))) ||
           // an intentional pass belongs to the new engine
-          (engine === "v5" && r.predictions.length === 0 && r.status === "completed" && !!r.council?.noPlay),
+          (engine === "v5" && !r.predictions.some((p) => p.units > 0) && r.status === "completed" && !!r.council?.noPlay),
       );
     }
     return list;
@@ -92,18 +92,25 @@ export default function RunsView({
     const seen = new Set<string>();
     const preds = runList.flatMap((r) => r.predictions).filter(matchesEngine);
     let w = 0, l = 0, push = 0, pnlSum = 0, pendingCount = 0, modelPnl = 0, modelN = 0;
+    let leanW = 0, leanL = 0;
     for (const p of preds) {
       // Only count each unique wager once across all runs
       const key = p.dedupeKey || `${p.id}`;
       if (seen.has(key)) continue;
       seen.add(key);
+      // A lean has no suggested stake: tallied on its own, never in the record or the P/L.
+      if (p.units === 0) {
+        if (p.outcome === "win") leanW++;
+        else if (p.outcome === "loss") leanL++;
+        continue;
+      }
       if (p.outcome === "pending") { pendingCount++; continue; }
       if (p.outcome === "win") { w++; const g = profit(p); pnlSum += g; if (isModelPriced(p)) { modelPnl += g; modelN++; } }
       else if (p.outcome === "loss") { l++; pnlSum -= p.units; if (isModelPriced(p)) { modelPnl -= p.units; modelN++; } }
       else if (p.outcome === "push") { push++; }
     }
     const d = w + l;
-    return { wins: w, losses: l, strike: d ? (w / d) * 100 : null, pnl: pnlSum, pending: pendingCount, total: seen.size, modelPnl, modelN };
+    return { wins: w, losses: l, strike: d ? (w / d) * 100 : null, pnl: pnlSum, pending: pendingCount, total: seen.size, modelPnl, modelN, leanW, leanL };
   }
 
   const officialStats = useMemo(() => computeStats(runs.filter((r) => r.isViewerRun)), [runs, engine]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -252,6 +259,9 @@ export default function RunsView({
         {st.modelN > 0 && (
           <StatBlock label="of which model-priced" value={`${st.modelPnl >= 0 ? "+" : ""}${st.modelPnl.toFixed(1)}u`} tone="text-[#ffb020]" />
         )}
+        {st.leanW + st.leanL > 0 && (
+          <StatBlock label="leans (no stake)" value={`${st.leanW}–${st.leanL}`} tone="text-[#9d7bff]" />
+        )}
         <StatBlock label="pending" value={String(st.pending)} tone="text-[#ffb020]" />
         
         {/* Dynamic breakdown blocks */}
@@ -303,10 +313,12 @@ export default function RunsView({
             seenInRun.add(k);
             return true;
           });
-          const rg = uniqueRp.filter((p) => p.outcome !== "pending" && !p.carried);
+          const playRp = rp.filter((p) => p.units > 0);
+          const leanCount = rp.length - playRp.length;
+          const rg = uniqueRp.filter((p) => p.units > 0 && p.outcome !== "pending" && !p.carried);
           const rw = rg.filter((p) => p.outcome === "win").length;
           const rl = rg.filter((p) => p.outcome === "loss").length;
-          const rpnl = uniqueRp.filter((p) => !p.carried).reduce((s, p) => s + profit(p), 0);
+          const rpnl = uniqueRp.filter((p) => p.units > 0 && !p.carried).reduce((s, p) => s + profit(p), 0);
           return (
             <Panel
               key={r.id}
@@ -332,8 +344,9 @@ export default function RunsView({
                     <span key={s} className={cx("clip-tag border px-1.5 py-px font-mono text-[8.5px] font-bold uppercase tracking-[0.12em]", isAdmin ? "border-[#39d5ff]/25 bg-[#39d5ff]/8 text-[#39d5ff]" : "border-white/10 bg-white/[0.04] text-[#5f7089]")}>{s}</span>
                   ))}
                 </span>
-                {rp.length === 0 && r.status === "completed" && <Chip tone="amber">PASS · no play</Chip>}
-                {rp.length > 0 && (
+                {playRp.length === 0 && r.status === "completed" && <Chip tone="amber">PASS · no play</Chip>}
+                {leanCount > 0 && <Chip tone="violet">{leanCount} lean{leanCount === 1 ? "" : "s"}</Chip>}
+                {playRp.length > 0 && (
                   <span className="font-mono text-[11px] font-bold">
                     <span className="text-[#37ff8b]">{rw}W</span>
                     <span className="text-[#3d4c63]"> – </span>
@@ -434,7 +447,9 @@ export default function RunsView({
                                 <td className="py-2 pr-3 text-right text-[#39d5ff]" title={p.modelProb != null ? "estimated win probability" : "legacy confidence score (not a probability)"}>
                                   {p.modelProb != null ? `${(p.modelProb * 100).toFixed(0)}%` : <span className="text-[#5f7089]">{p.confidence.toFixed(0)}*</span>}
                                 </td>
-                                <td className="py-2 pr-3 text-right">{p.units.toFixed(2).replace(/\.?0+$/, "")}u</td>
+                                <td className="py-2 pr-3 text-right">
+                                  {p.units === 0 ? <Chip tone="violet" className="!tracking-[0.1em]">LEAN</Chip> : `${p.units.toFixed(2).replace(/\.?0+$/, "")}u`}
+                                </td>
                                 <td className="py-2 pr-3 text-right"><OutcomeChip outcome={p.outcome} /></td>
                                 <td className="py-2 pr-3 text-right text-[#5f7089]">{p.finalScore ?? "—"}</td>
                                 <td className="py-2 text-right">

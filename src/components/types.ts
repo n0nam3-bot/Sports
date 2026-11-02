@@ -49,6 +49,13 @@ export type Discipline = "strict" | "standard" | "loose";
 export interface CouncilC {
   headline: string; memo: string; avoided: string[]; repeats?: RepeatC[];
   discipline?: string; exposure?: number; considered?: number; passed?: number; noPlay?: boolean;
+  leans?: number;
+  funnel?: {
+    games: number; analyzed: number; priced: number;
+    gaps: { reason: string; n: number }[];
+    candidates: number; plays: number; leans: number;
+    bestEv: number | null; bar: number;
+  };
 }
 export interface PredC {
   id: number; runId: number; sortOrder: number; slateDate: string; sport: string;

@@ -200,7 +200,7 @@ export function MyBetsView({ bets, summary, loading, error, syncing, onSync, onS
                   you: <b className="text-slate-100">{b.stake}u @ {fmtOdds(b.odds)}</b>
                 </span>
                 <span>
-                  suggested: {b.prediction.units}u @ {fmtOdds(b.prediction.odds)}
+                  {b.prediction.units === 0 ? "lean — no stake suggested" : `suggested: ${b.prediction.units}u`} @ {fmtOdds(b.prediction.odds)}
                   {b.prediction.priceSource === "model" ? " (model price)" : ""}
                 </span>
                 {b.evAtPrice != null && (

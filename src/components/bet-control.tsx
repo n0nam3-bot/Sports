@@ -38,7 +38,7 @@ interface Props {
 }
 
 const QUICK_ODDS = [-110, -115, -120, 100, 110];
-const QUICK_STAKES = [0.5, 1, 1.5, 2];
+const QUICK_STAKES = [0.25, 0.5, 1, 1.5, 2];
 
 const fmtU = (n: number): string => `${n > 0 ? "+" : n < 0 ? "−" : ""}${Math.abs(n).toFixed(2)}u`;
 
@@ -47,7 +47,9 @@ const isWorse = (entered: number, floor: number): boolean => profitPerUnit(enter
 
 export function BetControl({ pick, bet, onSave, onRemove, compact, defaultOpen, onDone }: Props) {
   const [open, setOpen] = useState(!!defaultOpen);
-  const [stake, setStake] = useState(String(bet?.stake ?? pick.units));
+  // A lean carries no suggested stake (units 0); offer a small default instead.
+  const suggested = pick.units > 0 ? pick.units : null;
+  const [stake, setStake] = useState(String(bet?.stake ?? suggested ?? 0.25));
   const [odds, setOdds] = useState(String(bet?.odds ?? (pick.priceSource === "model" && pick.minPrice ? pick.minPrice : pick.odds)));
   const [note, setNote] = useState(bet?.note ?? "");
   const [busy, setBusy] = useState(false);
@@ -162,9 +164,9 @@ export function BetControl({ pick, bet, onSave, onRemove, compact, defaultOpen, 
             className="mt-1 w-full rounded border border-white/10 bg-[#0d1424] px-2.5 py-2 font-mono text-[14px] text-slate-100 outline-none focus:border-[#37ff8b]/50"
           />
           <span className="mt-1.5 flex flex-wrap gap-1">
-            {[pick.units, ...QUICK_STAKES.filter((q) => q !== pick.units)].map((q, i) => (
-              <button key={q} type="button" onClick={() => setStake(String(q))} className={cx("rounded border px-1.5 py-0.5 font-mono text-[10px]", i === 0 ? "border-[#37ff8b]/40 text-[#37ff8b]" : "border-white/10 text-[#8fa3bd]")}>
-                {i === 0 ? `${q}u (suggested)` : `${q}u`}
+            {(suggested != null ? [suggested, ...QUICK_STAKES.filter((q) => q !== suggested)] : QUICK_STAKES).map((q, i) => (
+              <button key={q} type="button" onClick={() => setStake(String(q))} className={cx("rounded border px-1.5 py-0.5 font-mono text-[10px]", i === 0 && suggested != null ? "border-[#37ff8b]/40 text-[#37ff8b]" : "border-white/10 text-[#8fa3bd]")}>
+                {i === 0 && suggested != null ? `${q}u (suggested)` : `${q}u`}
               </button>
             ))}
           </span>

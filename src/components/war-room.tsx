@@ -92,7 +92,10 @@ export default function WarRoom(props: {
     props.setMarkets(props.markets.includes(id) ? props.markets.filter((x) => x !== id) : [...props.markets, id]);
 
   const showConsole = activeRun != null;
-  const predictions = card?.status === "completed" ? card.predictions : [];
+  const everyPick = card?.status === "completed" ? card.predictions : [];
+  // A lean has no suggested stake (units 0); plays are the staked picks.
+  const predictions = everyPick.filter((p) => p.units > 0);
+  const leanPicks = everyPick.filter((p) => p.units === 0);
   const council = card?.council;
   const allV5 = predictions.length > 0 && predictions.every((p) => p.modelProb != null);
   const includedCount = useMemo(
@@ -420,6 +423,7 @@ export default function WarRoom(props: {
               </div>
             )}
 
+            <Funnel council={council} />
             <Passed items={council.avoided} />
           </Panel>
 
@@ -448,8 +452,30 @@ export default function WarRoom(props: {
               )}
             </div>
           </div>
+          <Funnel council={council} />
           <Passed items={council.avoided} />
         </Panel>
+      )}
+
+      {/* ============ leans: positive but below the bar, no stake suggested ============ */}
+      {council && leanPicks.length > 0 && (
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center gap-3">
+            <h3 className="font-display text-[20px] font-bold uppercase tracking-tight text-[#b9a4ff]">
+              Leans <span className="text-[#9d7bff]">{"//"} {leanPicks.length}</span>
+            </h3>
+            <Chip tone="violet">no stake suggested</Chip>
+          </div>
+          <p className="max-w-3xl font-mono text-[11px] leading-relaxed text-[#8fa3bd]">
+            A lean is a small positive edge that isn&apos;t strong or confirmed enough to recommend. They&apos;re graded separately — they never touch the
+            Ledger&apos;s record or P/L — so over time you can see whether the bar is set right. Bet one only if you want to, and log it in My Bets.
+          </p>
+          <div className="grid gap-4 md:grid-cols-2">
+            {leanPicks.map((p, i) => (
+              <BetCard key={p.id} rank={i + 1} p={p} bet={props.betsByPred.get(p.id)} onSave={props.onSaveBet} onRemove={props.onRemoveBet} />
+            ))}
+          </div>
+        </div>
       )}
 
       {/* ============ slate board ============ */}
@@ -520,7 +546,8 @@ function BetCard({
   onSave: (b: BetSavePayload) => Promise<string | null>;
   onRemove: (predictionId: number) => Promise<void>;
 }) {
-  const hot = rank <= 3 && p.outcome === "pending";
+  const lean = p.units === 0;
+  const hot = !lean && rank <= 3 && p.outcome === "pending";
   const v5 = p.modelProb != null;
   const model = p.priceSource === "model";
   const fair = v5 ? fairAmerican(p.modelProb!) : null;
@@ -529,16 +556,17 @@ function BetCard({
       <div className="flex items-center gap-3">
         <span className={cx(
           "font-display text-[34px] font-bold leading-none",
-          rank <= 3 ? "text-[#37ff8b]" : "text-[#2b3a52]",
+          lean ? "text-[#6f5bb8]" : rank <= 3 ? "text-[#37ff8b]" : "text-[#2b3a52]",
           p.outcome === "win" && "text-[#37ff8b]",
           p.outcome === "loss" && "text-[#ff4757]/70",
         )}>
-          {String(rank).padStart(2, "0")}
+          {lean ? `L${rank}` : String(rank).padStart(2, "0")}
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-1.5">
             <CategoryChip category={p.category} />
             {v5 && <PriceChip source={p.priceSource} />}
+            {lean && <Chip tone="violet">LEAN</Chip>}
           </div>
           <div className="mt-1 font-display text-[15px] font-bold leading-snug text-[#e8f1fb]">{p.pick}</div>
         </div>
@@ -573,7 +601,11 @@ function BetCard({
         ) : (
           <span className="text-[#ffb020]">odds {fmtOdds(p.odds)}</span>
         )}
-        <span className="text-[#37ff8b]">{p.units.toFixed(2).replace(/\.?0+$/, "")}u suggested</span>
+        {lean ? (
+          <span className="text-[#9d7bff]">no stake suggested</span>
+        ) : (
+          <span className="text-[#37ff8b]">{p.units.toFixed(2).replace(/\.?0+$/, "")}u suggested</span>
+        )}
       </div>
 
       {v5 ? (
@@ -610,6 +642,55 @@ function BetCard({
         onRemove={onRemove}
       />
     </Panel>
+  );
+}
+
+function FunnelStep({ n, label }: { n: number; label: string }) {
+  return (
+    <span className="whitespace-nowrap">
+      <b className="text-[#e8f1fb]">{n}</b> {label}
+    </span>
+  );
+}
+
+/** Where the slate went. Makes "why so few picks?" answerable at a glance. */
+function Funnel({ council }: { council: NonNullable<RunC["council"]> }) {
+  const f = council.funnel;
+  if (!f) return null;
+  return (
+    <div className="mt-3 border-t border-white/6 pt-3">
+      <div className="mb-1.5 font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-[#5f7089]">how the slate was filtered</div>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[11px] text-[#8fa3bd]">
+        <FunnelStep n={f.games} label="games" /> <span className="text-[#3d4c63]">→</span>
+        <FunnelStep n={f.priced} label="priced" /> <span className="text-[#3d4c63]">→</span>
+        <FunnelStep n={f.candidates} label="candidates" /> <span className="text-[#3d4c63]">→</span>
+        <span className="whitespace-nowrap">
+          <b className="text-[#37ff8b]">{f.plays}</b> play{f.plays === 1 ? "" : "s"}
+        </span>
+        {f.leans > 0 && (
+          <>
+            <span className="text-[#3d4c63]">+</span>
+            <span className="whitespace-nowrap"><b className="text-[#9d7bff]">{f.leans}</b> lean{f.leans === 1 ? "" : "s"}</span>
+          </>
+        )}
+      </div>
+      {f.bestEv != null && (
+        <div className="mt-1.5 font-mono text-[10.5px] leading-relaxed text-[#5f7089]">
+          Best expected value on the whole board:{" "}
+          <b className={f.bestEv >= f.bar ? "text-[#37ff8b]" : f.bestEv >= 0 ? "text-[#39d5ff]" : "text-[#ff8296]"}>
+            {f.bestEv >= 0 ? "+" : ""}
+            {(f.bestEv * 100).toFixed(1)}%
+          </b>{" "}
+          · a play needs +{(f.bar * 100).toFixed(1)}% after the vig.
+          {f.bestEv < 0 && " Every posted price was at or above fair — there was nothing to beat."}
+        </div>
+      )}
+      {f.gaps.length > 0 && (
+        <div className="mt-1.5 font-mono text-[10.5px] leading-relaxed text-[#ffb020]">
+          Couldn&apos;t be priced: {f.gaps.map((g) => `${g.n}× ${g.reason}`).join("; ")}.
+        </div>
+      )}
+    </div>
   );
 }
 
