@@ -8,9 +8,9 @@ import {
   type MmaGrade,
   type TraceEntry,
 } from "@/db/schema";
-import { and, asc, eq, lt } from "drizzle-orm";
+import { and, asc, eq, inArray, lt } from "drizzle-orm";
 import { ensureAgentsSeeded, settleAgentRatings, type GradedForRating } from "./agents";
-import { fmtOdds, pct, type Candidate } from "./candidate";
+import { clusterFor, fmtOdds, pct, type Candidate } from "./candidate";
 import { DISCIPLINES, disciplineOf, type Discipline } from "./discipline";
 import {
   getFinals,
@@ -48,6 +48,11 @@ export const ENGINE_VERSION = 5;
 
 const slateCache = new Map<string, { at: number; games: GameInfo[]; degraded: string[] }>();
 const SLATE_TTL = 75_000;
+
+/** Drop cached slates (tests, and anything that needs a guaranteed-fresh read). */
+export function clearSlateCache(): void {
+  slateCache.clear();
+}
 
 export async function cachedSlate(
   date: string,
@@ -140,6 +145,21 @@ async function trace(runId: number, entry: Omit<TraceEntry, "at">): Promise<void
   const [row] = await db.select({ trace: runs.trace }).from(runs).where(eq(runs.id, runId));
   const next = [...(row?.trace ?? []), { ...entry, at: new Date().toISOString() }];
   await db.update(runs).set({ trace: next }).where(eq(runs.id, runId));
+}
+
+/** A pick already on the shared ledger for the slate being analysed. */
+interface LedgerPick {
+  id: number;
+  runId: number;
+  dedupeKey: string;
+  pick: string;
+  matchup: string;
+  outcome: string;
+  sport: string;
+  eventId: string;
+  category: string;
+  grade: GradeSpec;
+  units: number;
 }
 
 /** One bettable "angle" on one game: spread and moneyline on a side share a slot. */
@@ -334,12 +354,40 @@ export async function runPipeline(
     // ---------------- Layer 2: bounded LLM review (optional) ----------------
     const perGameMax = filter.mixed ? 2 : 3;
     const common = { discipline, health: health.buckets, globalBump: health.globalBump, perGameMax };
-    if (mode === "llm" && all.length) {
+
+    // ---- What is already on the ledger for this slate? ----
+    // Picks released by an earlier run (anyone's: the ledger is shared) must not compete for this
+    // run's slots. If they did, a re-run's pick limit and risk cap would fill up with bets that
+    // already exist — and are then thrown away as duplicates — while a genuinely NEW candidate was
+    // rejected as "card is full". So duplicates, and any other bet on an angle that is already
+    // taken, are kept out of the pool; the ones the council still endorses are reported as
+    // "standing" for context.
+    const onLedger = (await db
+      .select({
+        id: predictions.id, runId: predictions.runId, dedupeKey: predictions.dedupeKey,
+        pick: predictions.pick, matchup: predictions.matchup, outcome: predictions.outcome,
+        sport: predictions.sport, eventId: predictions.eventId, category: predictions.category,
+        grade: predictions.grade, units: predictions.units,
+      })
+      .from(predictions)
+      .where(and(eq(predictions.slateDate, run.slateDate), inArray(predictions.sport, run.sports)))) as LedgerPick[];
+    const ledgerByKey = new Map(onLedger.map((r) => [r.dedupeKey, r]));
+    const takenAngles = new Set(onLedger.map((r) => `${r.sport}:${r.eventId}:${clusterFor(r.category, r.grade)}`));
+    const ledgerKey = (c: Candidate) => dedupeKeyFor(run.slateDate, c);
+    const isDuplicate = (c: Candidate) => ledgerByKey.has(ledgerKey(c));
+    const pool = all.filter((c) => !isDuplicate(c) && !takenAngles.has(slotKeyOf(c)));
+    // What the new picks must respect: the per-game pick and risk limits, counting everything
+    // already on the ledger for each game.
+    const ledgerSeed = onLedger.map((r) => ({
+      sport: r.sport, eventId: r.eventId, cluster: clusterFor(r.category, r.grade), units: r.units, grade: r.grade,
+    }));
+
+    if (mode === "llm" && pool.length) {
       const elapsed = Date.now() - t0;
       if (elapsed > 32_000) {
         await trace(runId, { layer: "analyst", agent: "STRATEGA", message: "Skipping LLM review — the slate took too long to load to stay inside the host's time limit. The deterministic card stands.", mood: "warn" });
       } else {
-        const first = selectCard({ cands: all, ...common });
+        const first = selectCard({ cands: pool, ...common, ledger: ledgerSeed });
         const seen = new Set<number>();
         const shortlist: Candidate[] = [];
         const add = (c: Candidate) => {
@@ -353,7 +401,7 @@ export async function runPipeline(
         // same angle (e.g. the moneyline for a spread). Every plausible substitute must be
         // reviewed too, or an unreviewed number would take the slot at full probability.
         const held = new Set(first.card.map(slotKeyOf));
-        all.filter((c) => held.has(slotKeyOf(c)) && c.ev > -0.03).forEach(add);
+        pool.filter((c) => held.has(slotKeyOf(c)) && c.ev > -0.03).forEach(add);
         nearMisses(first.rejected, 8).forEach((r) => add(r.c));
         const byExpert = new Map<string, Candidate[]>();
         for (const c of shortlist) {
@@ -385,7 +433,13 @@ export async function runPipeline(
     }
 
     // ---------------- Layer 3b: the council decides ----------------
-    const { card, rejected, exposure, leans } = selectCard({ cands: all, ...common });
+    // Which already-released picks does the council still endorse? (the full pool, as before)
+    const overall = selectCard({ cands: all, ...common });
+    const standing: LedgerPick[] = [...overall.card, ...overall.leans]
+      .filter(isDuplicate)
+      .map((c) => ledgerByKey.get(ledgerKey(c))!);
+    // The NEW picks: chosen from what the ledger doesn't already hold, so duplicates never use a slot.
+    const { card, rejected, exposure, leans } = selectCard({ cands: pool, ...common, ledger: ledgerSeed });
     card.sort((a, b) => b.rank - a.rank);
     // A lean is shown in its own section, so neither it nor a weaker alternative on the same
     // angle is repeated as a "near miss".
@@ -414,6 +468,7 @@ export async function runPipeline(
       candidates: all.length,
       plays: card.length,
       leans: leans.length,
+      repeats: standing.length,
       bestEv: bookEvs.length ? Math.max(...bookEvs) : null,
       bar: cfg.minEv,
     };
@@ -424,9 +479,15 @@ export async function runPipeline(
       headline = `${card.length} PLAY${card.length === 1 ? "" : "S"} · ${exposure}u RISKED`;
       const priced = card.filter((c) => c.priceSource === "model").length;
       memo = `${card.length} play${card.length === 1 ? "" : "s"} cleared the bar from ${all.length} candidates across ${pre.length} games, risking ${exposure}u of the ${cfg.dailyCap}u ${cfg.label.toLowerCase()} cap. Stakes are quarter-Kelly on the estimated win probability at the real price, rounded down, with 1u = 1% of a 100u bankroll.${priced ? ` ${priced} ${priced === 1 ? "is" : "are"} model-priced: ESPN has no sportsbook number for ${priced === 1 ? "it" : "them"}, so check your book against the stated price floor before betting and log what you actually got in My Bets.` : ""}`;
+    } else if (standing.length) {
+      headline = `NOTHING NEW — ${standing.length} EARLIER PICK${standing.length === 1 ? "" : "S"} STAND`;
+      memo = `No new play cleared the bar. The ${standing.length} pick${standing.length === 1 ? "" : "s"} below ${standing.length === 1 ? "was" : "were"} already released on this slate and still stand — they're shown for context, are not counted again, and don't use up this run's pick or risk limits.`;
     } else {
       headline = leans.length ? `PASS — NO PLAY · ${leans.length} LEAN${leans.length === 1 ? "" : "S"}` : "PASS — NO PLAY CLEARS THE BAR";
       memo = `${all.length} candidate${all.length === 1 ? "" : "s"} across ${pre.length} games were priced and none cleared the ${cfg.label.toLowerCase()} bar (${(cfg.minEv * 100).toFixed(1)}% expected value after the vig, with independent confirmation). When the number on the screen is fair, the profitable decision is to pass. The closest calls are listed below; Loose discipline lowers the bar if you want more action.`;
+    }
+    if (card.length && standing.length) {
+      memo += ` ${standing.length} earlier pick${standing.length === 1 ? "" : "s"} from this slate still stand — shown for context, not counted again.`;
     }
     if (leans.length) {
       memo += ` ${leans.length} lean${leans.length === 1 ? " is" : "s are"} below the bar — a small positive edge that isn't strong or confirmed enough to recommend. No stake is suggested; they're graded separately so you can see whether the bar is set right.`;
@@ -448,10 +509,11 @@ export async function runPipeline(
 
     const decision: CouncilDecision = {
       headline, memo, avoided,
-      discipline, exposure, considered: all.length, passed: all.length - card.length, noPlay: card.length === 0,
+      discipline, exposure, considered: all.length, passed: all.length - card.length,
+      noPlay: card.length === 0 && standing.length === 0,
       leans: leans.length, funnel,
     };
-    await finishRun(runId, ownerId, run.slateDate, decision, card, health.buckets, leans);
+    await finishRun(runId, ownerId, run.slateDate, decision, card, health.buckets, leans, standing);
   } catch (err) {
     await trace(runId, {
       layer: "system",
@@ -503,9 +565,13 @@ async function finishRun(
   card: Candidate[],
   health: Map<string, BucketHealth>,
   leans: Candidate[] = [],
+  standing: LedgerPick[] = [],
 ): Promise<void> {
-  const repeats: NonNullable<CouncilDecision["repeats"]> = [];
-  const carried: number[] = [];
+  // Picks from earlier runs that the council still endorses: acknowledged, never re-inserted.
+  const repeats: NonNullable<CouncilDecision["repeats"]> = standing.map((r) => ({
+    pick: r.pick, matchup: r.matchup, firstRunId: r.runId, outcome: r.outcome,
+  }));
+  const carried: number[] = standing.map((r) => r.id);
   let released = 0;
   const leanSet = new Set(leans.map((c) => c.id));
 
@@ -566,10 +632,6 @@ async function finishRun(
   }
 
   const finalDecision: CouncilDecision = { ...decision, repeats };
-  if (repeats.length) {
-    finalDecision.memo =
-      `${decision.memo} ${repeats.length} of these ${repeats.length + released} selections were already on an earlier run — they are shown again here but stay graded once.`.trim();
-  }
 
   // An empty run is KEPT. Under the old forced-ten-picks engine an empty run
   // meant "nothing happened" and was deleted — but now a pass is a deliberate,

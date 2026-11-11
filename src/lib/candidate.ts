@@ -62,6 +62,39 @@ export interface Candidate {
   finalUnits?: number;
 }
 
+/**
+ * Which "angle" of a game a bet is on. Correlated bets share one: spread and moneyline on a side
+ * are one bet; the three MMA duration markets are one bet. It works from the stored grade, so it
+ * can be applied to picks already on the ledger as well as to fresh candidates.
+ */
+export function clusterFor(category: string, grade: GradeSpec): string {
+  const m = grade.mma;
+  if (m) {
+    switch (m.kind) {
+      case "ml":
+      case "spread":
+      case "method":
+        return "result";
+      case "rounds":
+      case "distance":
+      case "start_round":
+        return "duration";
+      case "sigstr":
+        return `sigstr:${m.fighter}`;
+      case "td":
+        return `td:${m.fighter}`;
+    }
+  }
+  // legacy fight rows predate the structured market
+  if (category === "fight_ml" || category === "fight_spread" || category === "fight_method_win") return "result";
+  if (category === "fight_rounds" || category === "fight_method" || category === "fight_distance" || category === "fight_start_round") return "duration";
+  if (category === "spread" || category === "moneyline") return "side";
+  if (category === "total") return "total";
+  if (category === "player_prop") return `prop:${grade.player ?? ""}:${grade.stat ?? ""}`;
+  if (category === "team_total") return `tt:${grade.teamAbbr ?? ""}`;
+  return `seg:${grade.segment ?? category}:${category}`;
+}
+
 export const fmtOdds = formatAmerican;
 
 export function fmtLine(v: number): string {

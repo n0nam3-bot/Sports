@@ -13,6 +13,7 @@
  *    fight, a per-game risk cap and a daily risk cap.
  */
 
+import type { GradeSpec } from "../db/schema";
 import type { Candidate } from "./candidate";
 import { DISCIPLINES, type Discipline, type DisciplineConfig } from "./discipline";
 import { stakeUnits } from "./edge";
@@ -30,8 +31,26 @@ export const PER_GAME_CAP = 2;
 export const MAX_UNITS_BOOK = 2;
 export const MAX_UNITS_MODEL = 1;
 
+/** A bet already on the ledger for the slate being selected (from any earlier run). */
+export interface LedgerSeed {
+  sport: string;
+  eventId: string;
+  /** the angle it is on (see clusterFor) */
+  cluster: string;
+  /** units staked; 0 for a lean */
+  units: number;
+  grade: GradeSpec;
+}
+
 export interface SelectInput {
   cands: Candidate[];
+  /**
+   * What is already on the ledger. These bets do NOT use up this card's pick limit or daily
+   * risk cap (a re-run shouldn't spend its slots on bets that already exist), but they DO count
+   * toward the per-game limits: the same fight can't quietly collect more bets, or more risk,
+   * every time the cluster is run again.
+   */
+  ledger?: LedgerSeed[];
   discipline: Discipline;
   health?: Map<string, BucketHealth>;
   /** added to every EV requirement when the whole engine is running cold */
@@ -70,7 +89,7 @@ const isCombat = (c: Candidate): boolean => COMBAT_CATEGORIES.has(c.category);
 const isDerived = (c: Candidate): boolean => c.priceSource === "model" && !isCombat(c);
 
 /** Same-bout picks that cannot both be right. */
-export function contradicts(a: Candidate, b: Candidate): boolean {
+export function contradicts(a: { grade: GradeSpec }, b: { grade: GradeSpec }): boolean {
   const x = a.grade.mma;
   const y = b.grade.mma;
   if (!x || !y) return false;
@@ -144,7 +163,17 @@ export function selectCard(input: SelectInput): SelectResult {
   eligible.sort((a, b) => b.rank - a.rank);
 
   const card: Candidate[] = [];
-  const perGame = new Map<string, { units: number; clusters: Set<string>; picks: Candidate[] }>();
+  const perGame = new Map<string, { units: number; clusters: Set<string>; picks: { grade: GradeSpec }[] }>();
+  for (const l of input.ledger ?? []) {
+    const gk = `${l.sport}:${l.eventId}`;
+    const st = perGame.get(gk) ?? { units: 0, clusters: new Set<string>(), picks: [] };
+    st.clusters.add(l.cluster); // the angle is taken, staked or not
+    if (l.units > 0) {
+      st.units += l.units;
+      st.picks.push({ grade: l.grade });
+    }
+    perGame.set(gk, st);
+  }
   let exposure = 0;
 
   for (const c of eligible) {
