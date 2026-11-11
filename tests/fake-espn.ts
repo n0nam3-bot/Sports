@@ -18,6 +18,8 @@ export interface FakeState {
   failSummary: Set<string>;
   /** add a fourth NBA game with a real-but-small edge (a "lean", not a play) */
   leanGame: boolean;
+  /** add a fifth NBA game with a moderate, confirmed edge — a NEW play that appears later */
+  extraEdgeGame: boolean;
   /** every URL requested, for assertions */
   log: string[];
   /** plays the LLM provider (OpenRouter). Return the model's text, or null to fail the call. */
@@ -35,6 +37,7 @@ export function newState(date: string): FakeState {
     fightStats: true,
     failSummary: new Set(["401003"]),
     leanGame: false,
+    extraEdgeGame: false,
     log: [],
     llmCalls: [],
   };
@@ -121,6 +124,9 @@ const MIA: TeamSpec = { id: "14", abbr: "MIA", name: "Miami Heat", total: "20-20
 const CHI: TeamSpec = { id: "4", abbr: "CHI", name: "Chicago Bulls", total: "20-20" };
 const SAC: TeamSpec = { id: "23", abbr: "SAC", name: "Sacramento Kings", total: "20-20" };
 const PHX: TeamSpec = { id: "21", abbr: "PHX", name: "Phoenix Suns", total: "20-20" };
+const DAL: TeamSpec = { id: "6", abbr: "DAL", name: "Dallas Mavericks", total: "22-18" };
+const HOU: TeamSpec = { id: "10", abbr: "HOU", name: "Houston Rockets", total: "20-20" };
+const UTA: TeamSpec = { id: "26", abbr: "UTA", name: "Utah Jazz", total: "15-25" };
 const WAS: TeamSpec = { id: "27", abbr: "WAS", name: "Washington Wizards", total: "10-30" };
 
 function nbaBoard(s: FakeState) {
@@ -133,8 +139,17 @@ function nbaBoard(s: FakeState) {
           fin ? { home: 108, away: 104, homeLine: [27, 27, 27, 27], awayLine: [26, 26, 26, 26] } : undefined),
       ]
     : [];
+  const extra = s.extraEdgeGame
+    ? [
+        // E5: HOU is on the second night of a back-to-back AND ESPN's projection likes DAL: two
+        // independent signals agree → a play (about +5% EV), but weaker than every other play.
+        nbaEvent("401005", DAL, HOU, s.date, odds("DAL", -3.5, 225.5, -150, 130),
+          fin ? { home: 110, away: 100, homeLine: [28, 27, 28, 27], awayLine: [25, 25, 25, 25] } : undefined),
+      ]
+    : [];
   return [
     ...lean,
+    ...extra,
     // E1: BOS (-4.5) host a NYK team on the second night of a back-to-back, missing two players,
     // while ESPN's own projection likes BOS far more than the market does.
     nbaEvent("401001", BOS, NYK, s.date, odds("BOS", -4.5, 221.5, -190, 160),
@@ -150,7 +165,14 @@ function nbaBoard(s: FakeState) {
 
 function nbaPrevDay(s: FakeState) {
   // NYK played last night → back-to-back tonight
+  const extraPrev = s.extraEdgeGame
+    ? [
+        nbaEvent("400902", UTA, HOU, prevDay(s.date), odds("UTA", 2.5, 220.5, 110, -130),
+          { home: 99, away: 105, homeLine: [25, 25, 25, 24], awayLine: [26, 26, 26, 27] }),
+      ]
+    : [];
   return [
+    ...extraPrev,
     nbaEvent("400900", WAS, NYK, prevDay(s.date), odds("WAS", 5.5, 220.5, 190, -230),
       { home: 98, away: 104, homeLine: [25, 25, 24, 24], awayLine: [26, 26, 26, 26] }),
   ];
@@ -170,6 +192,13 @@ function summaryFor(id: string, s: FakeState) {
         },
       ],
       predictor: { homeTeam: { gameProjection: "78.0" }, awayTeam: { gameProjection: "22.0" } },
+      boxscore: { players: [] },
+    };
+  }
+  if (id === "401005") {
+    return {
+      injuries: [],
+      predictor: { homeTeam: { gameProjection: "72.0" }, awayTeam: { gameProjection: "28.0" } },
       boxscore: { players: [] },
     };
   }

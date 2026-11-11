@@ -169,3 +169,22 @@ test("contradictory same-fight picks are never both released", () => {
   const distanceYes = sel.card.some((c) => c.grade.mma!.kind === "distance" && (c.grade.mma as { yes: boolean }).yes);
   assert.ok(!(finish && distanceYes), kinds.join(","));
 });
+
+test("clusterFor (used on stored picks) agrees with the cluster every candidate was generated with", async () => {
+  const { clusterFor } = await import("../src/lib/candidate");
+  const { evaluateTeamGame } = await import("../src/lib/team-model");
+  const { teamGame } = await import("./helpers");
+  // every MMA market
+  const all = evaluateBout(lopsided(), buildFilter(["fight_winner", "fight_spread", "rounds_0_5", "rounds_1_5", "rounds_2_5", "rounds_3_5", "rounds_4_5", "fight_distance_yes", "fight_distance_no", "fight_start_2", "fight_start_3", "fight_start_4", "fight_start_5", "method_dec", "method_sub", "method_ko", "fight_sigstr", "fight_td"]), idGen(), "loose").cands;
+  assert.ok(all.length >= 4);
+  for (const c of all) assert.equal(clusterFor(c.category, c.grade), c.cluster, `${c.category} ${JSON.stringify(c.grade.mma)}`);
+  // team sports: core + derived + props
+  const g = teamGame({ rest: { homeDays: 2, awayDays: 1, homeB2B: false, awayB2B: true, home3in4: false, away3in4: false, homeTravel: false, awayTravel: false }, leaders: [{ athlete: "P", teamAbbr: "BOS", position: "G", category: "pts", stat: "PTS", seasonValue: 30, perGame: 30 }] });
+  const team = evaluateTeamGame(g, buildFilter(["spread", "moneyline", "game_total", "team_total", "first_half", "first_quarter", "prop_points"]), idGen()).cands;
+  assert.ok(team.length >= 4);
+  for (const c of team) assert.equal(clusterFor(c.category, c.grade), c.cluster, `${c.category}`);
+  // a legacy fight row with no structured market
+  assert.equal(clusterFor("fight_ml", { side: "home", line: null }), "result");
+  assert.equal(clusterFor("fight_rounds", { side: "over", line: 1.5 }), "duration");
+  assert.equal(clusterFor("fight_method", { side: "under", line: 3 }), "duration");
+});

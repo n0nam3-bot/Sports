@@ -289,3 +289,66 @@ test("near-misses: a candidate far below fair value is not a 'near' miss", () =>
   assert.ok(shown.includes(close.id), "break-even is a genuine near-miss");
   assert.ok(!shown.includes(awful.id), "−14% EV is not near anything");
 });
+
+// ---------------------------------------------------------------------------
+// what is already on the ledger
+// ---------------------------------------------------------------------------
+const seed = (eventId: string, cluster: string, units: number, grade: Candidate["grade"] = { side: "home", line: -3.5 }) => ({
+  sport: "nba", eventId, cluster, units, grade,
+});
+
+test("ledger: bets that already exist do NOT use up this card's pick limit", () => {
+  // strict allows 3 picks. Three bets already exist on OTHER games; three new ones must still fit.
+  const existing = ["X1", "X2", "X3"].map((g) => seed(g, "side", 1));
+  const fresh = [0.546, 0.545, 0.544].map((p, i) => cand({ modelProb: p, gameId: `NEW${i}` }));
+  const withLedger = selectCard({ cands: fresh, discipline: "strict", ledger: existing });
+  assert.equal(withLedger.card.length, 3, "duplicates elsewhere spent none of the slots");
+  // and the daily risk cap is this run's own: existing exposure does not eat into it
+  assert.equal(withLedger.exposure, 3);
+});
+
+test("ledger: an angle that is already taken is closed, whether or not the bet was staked", () => {
+  const spread = cand({ modelProb: 0.537, gameId: "T1", cluster: "side" });
+  const total = cand({ modelProb: 0.537, gameId: "T1", cluster: "total", category: "total", bucket: bucketOf("nba", "total") });
+  const r = selectCard({ cands: [spread, total], discipline: "standard", ledger: [seed("T1", "side", 1)] });
+  assert.deepEqual(r.card.map((c) => c.id), [total.id], "the side is taken; the total is still open");
+  assert.match(r.rejected.find((x) => x.c.id === spread.id)!.reason, /already covers this angle/);
+  // an unstaked lean also holds its angle
+  const r2 = selectCard({ cands: [cand({ modelProb: 0.537, gameId: "T2", cluster: "side" })], discipline: "standard", ledger: [seed("T2", "side", 0)] });
+  assert.equal(r2.card.length, 0);
+});
+
+test("ledger: per-game limits are cumulative across runs (they used to reset every run)", () => {
+  // two staked bets already on this game; the per-game pick limit is 2
+  const a = cand({ modelProb: 0.537, gameId: "P1", cluster: "newangle" });
+  const r = selectCard({ cands: [a], discipline: "standard", ledger: [seed("P1", "a", 0.5), seed("P1", "b", 0.5)] });
+  assert.equal(r.card.length, 0);
+  assert.match(r.rejected[0].reason, /per-game pick limit/);
+  // an unstaked lean does not count as one of the two
+  const r2 = selectCard({ cands: [cand({ modelProb: 0.537, gameId: "P2", cluster: "z" })], discipline: "standard", ledger: [seed("P2", "a", 0.5), seed("P2", "b", 0)] });
+  assert.equal(r2.card.length, 1);
+
+  // and so is the 2u-per-game risk cap: 1.5u already on the game leaves room for 0.5u only
+  const big = cand({ modelProb: 0.545, gameId: "R1", cluster: "z" }); // sizes to 1u
+  const r3 = selectCard({ cands: [big], discipline: "standard", ledger: [seed("R1", "a", 1.5)] });
+  assert.equal(r3.card.length, 0);
+  assert.match(r3.rejected[0].reason, /more than 2u on one game/);
+  const r4 = selectCard({ cands: [cand({ modelProb: 0.537, gameId: "R2", cluster: "z" })], discipline: "standard", ledger: [seed("R2", "a", 1.5)] });
+  assert.equal(r4.card.length, 1, "a 0.5u bet still fits under the cap");
+});
+
+test("ledger: a new fight pick cannot contradict one already placed", () => {
+  const mk = (mma: NonNullable<Candidate["grade"]["mma"]>, category: Candidate["category"], cluster: string, side: Candidate["grade"]["side"]) =>
+    cand({
+      gameId: "F1", category, cluster, modelProb: 0.66, odds: -160, priceSource: "model", trust: 0.4, agree: 2,
+      grade: { side, line: null, segment: "FIGHT", mma }, bucket: bucketOf("ufc", category),
+    });
+  const distanceYes = mk({ kind: "distance", yes: true }, "fight_distance", "duration", "over");
+  const existingKo = seed("F1", "result", 0.75, { side: "home", line: null, mma: { kind: "method", fighter: "home", method: "ko" } });
+  const r = selectCard({ cands: [distanceYes], discipline: "loose", ledger: [existingKo] });
+  assert.equal(r.card.length, 0);
+  assert.match(r.rejected[0].reason, /contradicts/);
+  // …whereas a compatible bet is fine
+  const distanceNo = mk({ kind: "distance", yes: false }, "fight_distance", "duration", "under");
+  assert.equal(selectCard({ cands: [distanceNo], discipline: "loose", ledger: [existingKo] }).card.length, 1);
+});

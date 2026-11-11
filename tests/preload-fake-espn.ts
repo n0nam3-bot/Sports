@@ -31,5 +31,17 @@ Object.defineProperty(state, "leanGame", {
   },
   set() {},
 });
+// touch /tmp/fake-extra to add a later, moderate NEW play (a game that was not in the first run)
+Object.defineProperty(state, "extraEdgeGame", {
+  get() {
+    try {
+      readFileSync("/tmp/fake-extra");
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  set() {},
+});
 installFakeEspn(state);
 console.log(`[fake-espn] installed for ${D}`);

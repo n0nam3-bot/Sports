@@ -10,9 +10,9 @@ import { NextRequest } from "next/server";
 
 import { installFakeEspn, newState, type FakeState } from "./fake-espn";
 import { db } from "../src/db";
-import { agents, predictions, runs, userBets, type MmaGrade } from "../src/db/schema";
+import { agents, predictions, runs, userBets, type GradeSpec, type MmaGrade } from "../src/db/schema";
 import { ensureSchema } from "../src/lib/schema";
-import { cachedSlate, gradePending, runPipeline } from "../src/lib/engine";
+import { cachedSlate, clearSlateCache, dedupeKeyFor, gradePending, runPipeline } from "../src/lib/engine";
 import { listBets, upsertBet, setBetResult, deleteBet, betsToCsv } from "../src/lib/bets";
 import { listAgents } from "../src/lib/agents";
 import { parseMmaMoneylines } from "../src/lib/fighter-stats";
@@ -157,17 +157,98 @@ test("pipeline (mixed markets, standard discipline): releases only what clears t
   }
 });
 
-test("re-running the same slate never duplicates a wager", async () => {
+test("re-running the same slate never duplicates a wager, and adds nothing the first run didn't have", async () => {
   const before = await allPreds();
   const run2 = await newRun(["nba", "ufc", "dwcs"]);
   await runPipeline(run2, {}, OWNER, false);
   const after = await allPreds();
-  assert.equal(after.length, before.length, "no clones inserted");
+  // Before the per-game limits carried over between runs, this inserted a 4th pick (a third bet on the
+  // same fight) even though nothing about the slate had changed.
+  assert.equal(after.length, before.length, "no clones, and nothing new");
   const r = await runRow(run2);
   assert.equal(r.status, "completed");
-  assert.equal(r.carried.length, before.length, "every selection is acknowledged as carried");
+  assert.equal(r.carried.length, before.length, "every pick the council still endorses is acknowledged as standing");
   assert.equal(r.council!.repeats!.length, before.length);
-  assert.match(r.council!.memo, /already on an earlier run/);
+  assert.match(r.council!.headline, /NOTHING NEW/);
+  assert.match(r.council!.memo, /still stand/);
+  assert.equal(r.council!.funnel!.repeats, before.length);
+  assert.equal(r.council!.noPlay, false, "the day's card exists; this run just added nothing to it");
+  assert.equal(r.council!.exposure, 0, "a run that adds nothing risks nothing");
+});
+
+test("duplicates do not use up a re-run's slots: a genuinely new pick still gets in", async () => {
+  await db.delete(userBets);
+  await db.delete(predictions);
+  clearSlateCache();
+  // strict allows only 3 picks: the first run's three fill the card completely
+  const r1 = await newRun(["nba", "ufc", "dwcs"], [], "strict");
+  await runPipeline(r1, {}, OWNER, false);
+  const first = await allPreds();
+  assert.equal(first.length, 3, `strict's card is full: ${first.map((p) => p.pick).join(" | ")}`);
+
+  // later, a moderate confirmed edge appears on a game that was not in the first run
+  state.extraEdgeGame = true;
+  clearSlateCache();
+  const r2 = await newRun(["nba", "ufc", "dwcs"], [], "strict");
+  await runPipeline(r2, {}, OWNER, false);
+  const second = await allPreds();
+  const added = second.filter((p) => p.runId === r2);
+  // The old engine selected over the full pool, so the three existing bets (which rank higher)
+  // filled the card and this one was rejected as "card is full" — then the three were discarded
+  // as duplicates. Slots spent, nothing gained.
+  assert.equal(added.length, 1, `exactly one new pick: ${added.map((p) => p.pick).join(" | ")}`);
+  assert.match(added[0].matchup, /DAL/);
+  assert.ok(added[0].units > 0);
+  const row2 = await runRow(r2);
+  assert.equal(row2.carried.length, 3, "the three earlier picks still stand");
+  assert.equal(row2.council!.funnel!.plays, 1);
+  assert.equal(row2.council!.funnel!.repeats, 3);
+  assert.equal(row2.council!.exposure, added[0].units, "this run risks only what it added");
+  assert.match(row2.council!.memo, /3 earlier picks from this slate still stand/);
+  // …and the existing games gained nothing: per-game limits carry over between runs
+  assert.equal(second.filter((p) => p.matchup.includes("BOS")).length, 1);
+  assert.equal(second.filter((p) => p.matchup.includes("FIGHTER")).length, 2);
+
+  // a third run with the same information adds nothing at all
+  clearSlateCache();
+  const r3 = await newRun(["nba", "ufc", "dwcs"], [], "strict");
+  await runPipeline(r3, {}, OWNER, false);
+  state.extraEdgeGame = false;
+  assert.equal((await allPreds()).length, 4);
+  assert.match((await runRow(r3)).council!.headline, /NOTHING NEW/);
+});
+
+test("runs that add nothing new go to the Log, not the Ledger — and can never push real runs out of its window", async () => {
+  const { GET } = await import("../src/app/api/runs/route");
+  const list = async () => ((await (await GET(new NextRequest("http://x/api/runs"))).json()) as { runs: { id: number; productive: boolean; slateDate: string; predictions: unknown[] }[] }).runs;
+
+  const before = await list();
+  const productiveIds = before.filter((r) => r.productive).map((r) => r.id);
+  const idleIds = before.filter((r) => !r.productive).map((r) => r.id);
+  assert.ok(productiveIds.length >= 2, "runs that released a new pick are productive");
+  assert.ok(idleIds.length >= 2, "…and the ones that only repeated earlier picks are not");
+  // a run that only re-selected earlier picks still shows them (the War Room needs the day's card)…
+  const repeatRun = before.find((r) => !r.productive && r.predictions.length > 0);
+  assert.ok(repeatRun, "a repeat-only run still carries the picks that stand, for display");
+  // …but it released nothing of its own
+  const fresh = await db.select().from(predictions).where(eq(predictions.runId, repeatRun!.id));
+  assert.equal(fresh.length, 0);
+
+  // Pile on far more empty runs than either window holds. Under a single combined 50-run window these
+  // newer runs would push every productive run out of the Ledger.
+  await db.insert(runs).values(
+    Array.from({ length: 130 }, () => ({ ownerId: OWNER, slateDate: "2000-01-01", sports: ["nba"], status: "completed", discipline: "standard" })),
+  );
+  const after = await list();
+  assert.deepEqual(
+    after.filter((r) => r.productive).map((r) => r.id).sort((a, b) => a - b),
+    productiveIds.sort((a, b) => a - b),
+    "every productive run is still in the Ledger's window",
+  );
+  const idle = after.filter((r) => !r.productive);
+  assert.equal(idle.length, 100, "the Log keeps its own, separate window");
+  assert.ok(idle.every((r, i, a) => i === 0 || a[i - 1].id > r.id), "newest first");
+  await db.delete(runs).where(eq(runs.slateDate, "2000-01-01"));
 });
 
 test("focused MMA selections return exactly the markets asked for, with structured grades", async () => {
@@ -182,6 +263,10 @@ test("focused MMA selections return exactly the markets asked for, with structur
   ];
   const seen = new Set<string>();
   for (const [markets, ok] of families) {
+    // Each family is judged on a clean ledger: the engine (correctly) won't stack a second bet on an
+    // angle of a fight that already has one, so families that share an angle would otherwise block each other.
+    await db.delete(userBets);
+    await db.delete(predictions);
     const id = await newRun(["ufc"], markets, "loose");
     await runPipeline(id, {}, OWNER, false);
     const r = await runRow(id);
@@ -363,12 +448,46 @@ test("leans: a sub-bar edge is published with NO stake, and never touches rating
 });
 
 test("grading: every released pick settles correctly against the final scores", async () => {
-  // rebuild a rich card: the default card + one focused run per MMA family
+  // The pipeline won't stack several bets on one angle of one fight, so to exercise the grader on EVERY market
+  // kind, file one pick per market directly — exactly as earlier runs would have.
   await db.delete(userBets);
   await db.delete(predictions);
+  clearSlateCache();
   await runPipeline(await newRun(["nba", "ufc", "dwcs"]), {}, OWNER, false);
-  for (const markets of [["rounds_0_5", "rounds_1_5", "rounds_2_5", "rounds_3_5", "rounds_4_5"], ["fight_start_2", "fight_start_3", "fight_start_4", "fight_start_5"], ["fight_distance_yes", "fight_distance_no"], ["method_dec", "method_sub", "method_ko"], ["fight_spread"], ["fight_sigstr"], ["fight_td"], ["fight_winner"]]) {
-    await runPipeline(await newRun(["ufc"], markets, "loose"), {}, OWNER, false);
+  const fightRef = { league: "ufc" as const, cardId: "CARD1", homeId: "4001002", awayId: "4001001" };
+  const both = ["home", "away"] as const;
+  const dirs = ["over", "under"] as const;
+  const markets: MmaGrade[] = [
+    ...both.map((fighter) => ({ kind: "ml", fighter }) as MmaGrade),
+    ...[0.5, 1.5, 2.5, 3.5, 4.5].flatMap((line) => dirs.map((dir) => ({ kind: "rounds", dir, line }) as MmaGrade)),
+    { kind: "distance", yes: true },
+    { kind: "distance", yes: false },
+    ...[2, 3, 4, 5].flatMap((round) => [true, false].map((yes) => ({ kind: "start_round", round, yes }) as MmaGrade)),
+    ...both.flatMap((fighter) => [-1.5, 1.5].map((line) => ({ kind: "spread", fighter, line }) as MmaGrade)),
+    ...both.flatMap((fighter) => (["ko", "sub", "dec"] as const).map((method) => ({ kind: "method", fighter, method }) as MmaGrade)),
+    ...both.flatMap((fighter) => [30.5, 55.5, 70.5].flatMap((line) => dirs.map((dir) => ({ kind: "sigstr", fighter, dir, line }) as MmaGrade))),
+    ...both.flatMap((fighter) => [0.5, 1.5].flatMap((line) => dirs.map((dir) => ({ kind: "td", fighter, dir, line }) as MmaGrade))),
+  ];
+  const categoryOf = { ml: "fight_ml", rounds: "fight_rounds", distance: "fight_distance", start_round: "fight_start_round", spread: "fight_spread", method: "fight_method_win", sigstr: "fight_sigstr", td: "fight_td" } as const;
+  const legacy = (m: MmaGrade): Pick<GradeSpec, "side" | "line"> => {
+    switch (m.kind) {
+      case "ml": case "method": return { side: m.fighter, line: null };
+      case "spread": return { side: m.fighter, line: m.line };
+      case "rounds": case "sigstr": case "td": return { side: m.dir, line: m.line };
+      case "distance": return { side: m.yes ? "over" : "under", line: null };
+      case "start_round": return { side: m.yes ? "over" : "under", line: m.round };
+    }
+  };
+  for (const [i, mma] of markets.entries()) {
+    const grade: GradeSpec = { ...legacy(mma), segment: "FIGHT", mma, fightRef };
+    const category = categoryOf[mma.kind];
+    await db.insert(predictions).values({
+      ownerId: OWNER, runId: run1, sortOrder: 100 + i, slateDate: D, sport: "ufc", eventId: "B1",
+      dedupeKey: dedupeKeyFor(D, { game: { sport: "ufc", eventId: "B1" }, category, grade }),
+      matchup: "FIGHTER vs FIGHTER", category, pick: `filed ${mma.kind} ${JSON.stringify(mma)}`, lineLabel: "x",
+      odds: -110, units: 0.5, confidence: 60, edge: 3, modelProb: 0.6, priceSource: "model", minPrice: -110, engineVersion: 5,
+      agents: ["MMA_EXPERT"], grade,
+    }).onConflictDoNothing(); // (the pipeline's own pick on the same wager, if any, is graded by the same oracle)
   }
   const pending = await allPreds();
   assert.ok(pending.every((p) => p.outcome === "pending"));
