@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { predictions, runs } from "@/db/schema";
-import { desc, inArray } from "drizzle-orm";
+import { desc, inArray, sql } from "drizzle-orm";
 import { runPipeline } from "@/lib/engine";
 import { disciplineOf } from "@/lib/discipline";
 import { SPORT_PATHS } from "@/lib/espn";
@@ -15,13 +15,24 @@ export const dynamic = "force-dynamic";
 // function-based platforms we let the cluster finish inside the request.
 export const maxDuration = 60;
 
+// (route modules may only export handlers/config, so these stay private)
+/** how many runs that ADDED something the Ledger keeps */
+const LEDGER_RUNS = 50;
+/** how many runs that added nothing the Log keeps */
+const LOG_RUNS = 100;
+
 export async function GET(req: NextRequest) {
   await ensureSchema();
-    const list = await db
-    .select()
-    .from(runs)
-    .orderBy(desc(runs.id))
-    .limit(50);
+  // A run is "productive" if it released at least one NEW pick (play or lean). Passes and runs
+  // that only re-selected picks already on the ledger add nothing to the record, so they must not
+  // take up one of the Ledger's slots — they live in the Log. Each group has its own window, so
+  // a pile of empty runs can never push real ones out.
+  const added = sql`exists (select 1 from ${predictions} where ${predictions.runId} = ${runs.id})`;
+  const [productive, logged] = await Promise.all([
+    db.select().from(runs).where(added).orderBy(desc(runs.id)).limit(LEDGER_RUNS),
+    db.select().from(runs).where(sql`not ${added}`).orderBy(desc(runs.id)).limit(LOG_RUNS),
+  ]);
+  const list = [...productive, ...logged].sort((a, b) => b.id - a.id);
   const ids = list.map((r) => r.id);
   const preds = ids.length
     ? await db.select().from(predictions).where(inArray(predictions.runId, ids))
@@ -56,6 +67,8 @@ export async function GET(req: NextRequest) {
         // never serialise the workspace id: it is the owner's only credential
         ...scrub(r),
         isViewerRun: r.ownerId === adminOwnerId() && adminOwnerId() !== "",
+        // true when this run released something new; false → it belongs in the Log
+        productive: (byRun.get(r.id)?.length ?? 0) > 0,
         // the council's own order (EV-driven), fresh picks before carried ones
         predictions: [...fresh, ...carried].sort((a, b) => (a.carried === b.carried ? a.sortOrder - b.sortOrder : a.carried ? 1 : -1)),
       };
