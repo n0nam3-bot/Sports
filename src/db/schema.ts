@@ -54,6 +54,8 @@ export interface CouncilDecision {
     candidates: number;
     plays: number;
     leans: number;
+    /** earlier picks on this slate that the council still endorses (not counted again) */
+    repeats?: number;
     /** best expected value among posted-price candidates (a fraction), if any */
     bestEv: number | null;
     /** the EV a posted-price play had to clear */
