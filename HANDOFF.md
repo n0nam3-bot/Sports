@@ -9,30 +9,28 @@
 | **Repo** | https://github.com/n0nam3-bot/Sports (public, single branch `main`) |
 | **Release** | v5.1.0 "Market-Anchored Engine" (`src/lib/release.ts`, built 2026-10-25) · engine v5 · playbook v5 |
 | **Handoff written** | 2026-11-23 |
-| **Verified against** | commit `ba40a22` (2026-11-11 16:05 ET) — the last commit that changed code |
+| **Base commit** | `ba40a22` (2026-11-11 16:05 ET) — the last commit that changed code when this file was verified. Later uploads are the zips recorded in §22 |
 | **Health at that commit** | tests **153 / 153 pass** (~64 s) · `tsc` clean (app and tests) · `next build` OK · lint **4 errors + 1 warning** (K-04) |
 | **Verified with** | Node 22.23.5 / npm 10.9.9 (`package.json` has no `engines` pin). Fake ESPN only — **live ESPN and the live deployment were not reachable** from the verification sandbox |
 
-**Staleness check — do this first.** Run `git log -1`. If HEAD is newer than `ba40a22` (ignoring commits that only touch `HANDOFF.md` / `README.md`), run `git log --stat ba40a22..HEAD`, read what changed, and update this file *before* relying on it.
+**Staleness check — do this first.** Run `git log --stat <base commit>..HEAD`. The commits after the base should match the newest entries in §22 (the owner's uploads of earlier zips; ignore commits that only touch `HANDOFF.md` / `README.md`). Anything else is **unrecorded work**: read it and update this file *before* relying on it. Also ask the owner whether the last zip delivered (by you or an earlier chat) has been uploaded — if not, have them attach it, otherwise you build on stale code and your whole-file delivery can overwrite theirs.
 
 ---
 
-## Kickoff prompt — paste this at the start of every new chat
+## Kickoff text — save it in your Project / account instructions, or paste it at the start of a chat
 
 ```text
-I'm continuing work on my project NEONSLIP.
-Repo: https://github.com/n0nam3-bot/Sports
-
-Before doing anything else: get the repo (git clone works), read HANDOFF.md completely —
-it is the source of truth for how the project works, the roadmap, known issues and the
-rules for working with me. Then tell me in 5 lines or fewer: the current state, what was
-last in progress, and the top 3 things you propose to do next. Don't change anything until
-I confirm. Whenever you change something, run the checks in HANDOFF.md, give me complete
-files with their full repo paths, and at the end of the session give me the complete,
-updated HANDOFF.md.
+At the start of every chat about NEONSLIP: run `git clone https://github.com/n0nam3-bot/Sports.git`
+in the sandbox and read `HANDOFF.md` fully before doing anything else. It is the single source of
+truth. Ask me whether the last zip you gave me has been uploaded; if not, have me attach it.
+Every time you give me code, run the checks listed in HANDOFF.md and put the changed files plus
+an updated `HANDOFF.md` (current state, known issues, roadmap, changelog) in the same zip.
+If the clone fails, ask me to attach or paste the file.
 ```
 
-*No repo access in that chat?* Attach this file plus the specific files involved, and say so — never guess at code you cannot see.
+*Scope:* in a Project used only for NEONSLIP the wording above is right. In account-wide instructions it would fire in unrelated chats, so start it with "When I mention NEONSLIP:" instead. The clone needs the chat's code-execution / file-creation capability switched on.
+
+*No repo access in that chat?* Ask the owner to attach or paste this file plus the specific files involved — never guess at code you cannot see.
 
 ---
 
@@ -70,22 +68,22 @@ These are the rules that, if broken, cause real damage. Everything else in this 
 
 1. **Read first, verify second.** Read this file, then confirm what you rely on against the code. Code wins; then fix the doc.
 2. **Passing is a valid result.** Never force picks, pad a card, or lower a bar silently. Any change that makes the engine release *more* picks needs the owner's explicit OK and a changelog entry.
-3. **Deliver complete files, never patch scripts.** The owner uploads through the GitHub web UI (every one of the 371 commits is "Add files via upload"). Give each changed file **in full** with its **full repo path** (e.g. `src/lib/engine.ts`), list exactly which files changed, and keep that set small. Never write `patch_*.py` / `fix_*.py`-style scripts: 23 stale ones sit in the repo root today (K-02) and several would damage the current code if run.
+3. **Deliver one zip of complete files, never patch scripts.** The owner uploads through the GitHub web UI (every one of the 371 commits is "Add files via upload"). Put every changed file **in full**, at its **full repo path** (e.g. `src/lib/engine.ts`), in **one zip together with the current `HANDOFF.md`**; list the changed files in your message and keep that set small. Never write `patch_*.py` / `fix_*.py`-style scripts: 23 stale ones sit in the repo root today (K-02) and several would damage the current code if run.
 4. **Verify before delivering.** In a sandbox run the checks in §1. "Tests pass" must mean *you ran them*. If you could not run something, say so plainly. Don't add new lint errors (4 pre-existing).
 5. **The schema lives in two places.** `src/db/schema.ts` (Drizzle) **and** `src/lib/schema.ts` (`ensureSchema()`, raw idempotent SQL). Change both, additively only (`ADD COLUMN IF NOT EXISTS`), and cover it in `tests/schema-upgrade.test.ts`. The owner runs no migrations — the app upgrades the database itself on first request.
 6. **Secrets and identity.** LLM keys travel only in the `x-neonslip-keys` header for one request — never store or log them. Never serialise `ownerId` (a workspace id is a credential): use `scrub()`. Never expose server env keys.
 7. **A lean is `units === 0`.** That zero is how every screen and query recognises a lean. A play must never have 0 units; a lean must never have more. Leans never touch the record, P/L, agent ratings or track-record gating.
 8. **One wager = one ledger row.** Identity is `dedupeKey` (§11). Never insert a clone; never count a wager twice in any record.
 9. **Don't casually bump `PROMPT_VERSION`** (`src/lib/agents.ts`) — it archives and **resets every agent's rating and W-L record**. Bump `ENGINE_VERSION` only for a deliberate new engine (health gating reads `engine_version >= 5`).
-10. **Update this file at the end of every session** (§17 Where we left off, §18 Known issues, §19 Roadmap, §22 Changelog) and give the owner the **complete** updated file — not a diff.
+10. **Update this file with every delivery** — a chat's end is invisible to you, so don't wait for it. Refresh §17 Where we left off, §18 Known issues, §19 Roadmap and add a §22 Changelog entry, and put the **complete** file (not a diff) in the same zip as the code.
 
 ---
 
 ## 1. Session protocol
 
 ### Start of session
-1. **Get the code.** `git clone https://github.com/n0nam3-bot/Sports.git` works without credentials. (In one session `web_fetch` on the `.git` URL was refused — clone with git, or browse `https://github.com/n0nam3-bot/Sports` / raw.githubusercontent.com.)
-2. **Read this file** and run the staleness check above.
+1. **Get the code.** `git clone https://github.com/n0nam3-bot/Sports.git` works without credentials. (In one session `web_fetch` on the `.git` URL was refused — clone with git, or browse `https://github.com/n0nam3-bot/Sports` / raw.githubusercontent.com.) If you can't clone (no sandbox or no network), ask the owner to attach or paste this file and the files you need.
+2. **Read this file**, run the staleness check above, and ask whether the last zip has been uploaded.
 3. **Run the health checks** and compare with the Health row in the header:
 
    ```bash
@@ -96,7 +94,7 @@ These are the rules that, if broken, cause real damage. Everything else in this 
    npx next build            # needs no DATABASE_URL
    npx eslint .              # known: 4 errors + 1 warning (K-04)
    ```
-4. **Brief the owner in ≤ 5 lines**: current state · what was last in progress (§17) · your top 3 proposals. Ask for direction. Change nothing yet.
+4. **If the owner opened with a clear task, do it** (after steps 1–3) and flag anything in §17 / §18 that affects it. **If not, brief them in ≤ 5 lines** — current state · what was last in progress (§17) · your top 3 proposals — and ask for direction before changing anything.
 5. **Ask the open questions in §2** if the task depends on them.
 
 ### While working
@@ -106,20 +104,21 @@ These are the rules that, if broken, cause real damage. Everything else in this 
 - Don't "improve" things that weren't asked for. Put ideas in §19 instead.
 
 ### Handing code back
-- List the changed files (full paths), then give each file **complete**.
-- Say how to ship it: *GitHub → Add file → Upload files → drop the files (keep folder paths) → Commit changes.* Folders can be created by typing the path when creating a file.
-- **Bump `src/lib/release.ts`** (`version`, `name`, `built`, `features`) with every delivery: after the host redeploys, `/api/version` then proves the upload landed in full (the owner has no CI and no terminal to check otherwise).
+- Deliver **one zip**: the changed files, complete, at their repo paths, **plus the updated `HANDOFF.md` — every time**. List the changed files in your message.
+- Tell the owner how to ship it: **unzip first**, then *GitHub → Add file → Upload files* → drag the extracted files/folders in (folder paths are preserved) → *Commit changes*. Folders can also be created by typing a path when creating a file. **Don't upload the `.zip` itself**: GitHub stores it as a file — on 2026-11-11 a `Sports-main-wip.zip` (and a stray file called `download`) landed in the repo and were deleted within minutes.
+- **Bump `src/lib/release.ts`** (`version`, `name`, `built`, `features`) with every code delivery: after the host redeploys, `/api/version` then proves the upload landed in full (the owner has no CI and no terminal to check otherwise).
 - Tell the owner what to look at after deploy: `/api/version`, `/api/health`, and the specific screen you changed.
 
-### End of session
-Update §17, §18, §19, §22 (and the header's *Verified against / Health* rows), and hand over the **complete** `HANDOFF.md`.
+### Every delivery (not just "the end")
+Refresh §17 (where we left off), §18 (known issues), §19 (roadmap), add a §22 entry, update the header's *Base commit / Health* rows if you re-verified, and put the **complete** `HANDOFF.md` in the zip. If a session produced no code but changed what is known (a decision, a new issue), still hand over the updated file.
+
 
 ---
 
 ## 2. Owner & context — what is and isn't known
 
 **Established from git history (facts):**
-- Single owner. 371 commits, 2026-09-26 → 2026-11-11, essentially all titled "Add files via upload". Folders were made in the GitHub web UI with placeholder files named `A` (commits "Create A", "Rename src/app/api/bets/A to tests/A", "Delete tests/A"). **Assume no local terminal and often a phone** unless told otherwise (the README stresses "no laptop or terminal required"). Give click-by-click instructions, not shell snippets, for anything the owner must do themselves.
+- Single owner. 371 commits, 2026-09-26 → 2026-11-11, essentially all titled "Add files via upload". Folders were made in the GitHub web UI with placeholder files named `A` (commits "Create A", "Rename src/app/api/bets/A to tests/A", "Delete tests/A"). **Assume no local terminal and often a phone** unless told otherwise (the README stresses "no laptop or terminal required"). Give click-by-click instructions, not shell snippets, for anything the owner must do themselves. Chats deliver code as a **zip**; the owner unzips and uploads the files (a `.zip` once reached the repo by mistake, see §1).
 - The deploy target described in the README is **Vercel + Neon** (Render is the documented alternative). The repo records no live URL.
 - The product tone is a dark, neon "gamer/capper" UI. Keep new UI in that language (§14).
 
@@ -612,3 +611,4 @@ Severity: **Medium** = user-visible inconsistency or unfinished work · **Low** 
 - Verified:  baseline `ba40a22` — tests 153/153 · typecheck clean · typecheck:tests clean · `next build` OK · lint 4 errors + 1 warning
 - Release:   none (still 5.1.0)
 - Left open: K-01 (Ledger/Log UI) is the next task; K-02 cleanup; owner to confirm roadmap priorities (§19)
+- Revised:   same day, per the owner's instruction — chats deliver **one zip** (changed files + the updated `HANDOFF.md`), `HANDOFF.md` is refreshed with **every** delivery, the staleness check is keyed to a *base commit*, and the kickoff text is now the owner's own wording (§1, rules 3 and 10)
