@@ -1,5 +1,7 @@
 # NEONSLIP — Agent Cluster Betting Intelligence
 
+> **New chat, AI assistant or contributor? Read [`HANDOFF.md`](HANDOFF.md) first** — how everything works, the rules for working on this repo, known issues, the roadmap, and where the last session left off.
+
 An agent cluster that prices a sports slate **against the sportsbook's own number** and releases only
 the plays that still have positive expected value after the vig. UFC / DWCS / PFL get a full set of
 fight markets, and a built-in **My Bets** tracker shows *your* unit gain on what you actually bet.
