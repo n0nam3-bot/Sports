@@ -96,6 +96,11 @@ export default function WarRoom(props: {
   // A lean has no suggested stake (units 0); plays are the staked picks.
   const predictions = everyPick.filter((p) => p.units > 0);
   const leanPicks = everyPick.filter((p) => p.units === 0);
+  // After a re-run the slip shows the day's whole card: this run's new plays plus earlier ones that still stand.
+  // The commissioner's headline counts only what this run adds, so the exposure figure reconciles the two.
+  const exposureUnits = Number(predictions.reduce((s, p) => s + p.units, 0).toFixed(2));
+  const newUnits = Number(predictions.filter((p) => !p.carried).reduce((s, p) => s + p.units, 0).toFixed(2));
+  const hasStanding = predictions.some((p) => p.carried);
   const council = card?.council;
   const allV5 = predictions.length > 0 && predictions.every((p) => p.modelProb != null);
   const includedCount = useMemo(
@@ -393,7 +398,12 @@ export default function WarRoom(props: {
               <div className="flex gap-5 font-mono text-right text-[11px]">
                 <div>
                   <div className="text-[9px] uppercase tracking-[0.2em] text-[#5f7089]">exposure</div>
-                  <div className="text-xl font-bold text-[#37ff8b]">{Number(predictions.reduce((s, p) => s + p.units, 0).toFixed(2))}u</div>
+                  <div className="text-xl font-bold text-[#37ff8b]">{exposureUnits}u</div>
+                  {hasStanding && (
+                    <div className="mt-0.5 text-[9px] tracking-[0.06em] text-[#5f7089]" title="what this run adds vs. what earlier runs already put on the ledger">
+                      {newUnits}u new · {Number((exposureUnits - newUnits).toFixed(2))}u on ledger
+                    </div>
+                  )}
                 </div>
                 <div>
                   <div className="text-[9px] uppercase tracking-[0.2em] text-[#5f7089]">{allV5 ? "avg win prob" : "avg conf"}</div>
@@ -671,6 +681,12 @@ function Funnel({ council }: { council: NonNullable<RunC["council"]> }) {
           <>
             <span className="text-[#3d4c63]">+</span>
             <span className="whitespace-nowrap"><b className="text-[#9d7bff]">{f.leans}</b> lean{f.leans === 1 ? "" : "s"}</span>
+          </>
+        )}
+        {!!f.repeats && (
+          <>
+            <span className="text-[#3d4c63]">+</span>
+            <span className="whitespace-nowrap"><b className="text-[#39d5ff]">{f.repeats}</b> already on your ledger</span>
           </>
         )}
       </div>

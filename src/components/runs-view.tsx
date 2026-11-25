@@ -9,6 +9,7 @@ import type { BetC, PredC, RunC } from "./types";
 import { CategoryChip, Chip, OutcomeChip, Panel, cx, fmtOdds } from "./ui";
 import { vaultFetch, loadLlmMode } from "./keys";
 import { BetControl, type BetSavePayload } from "./bet-control";
+import { isLogRun, runKind, splitRuns } from "./ledger";
 
 function profit(p: PredC): number {
   if (p.outcome === "win") return p.units * (p.odds > 0 ? p.odds / 100 : 100 / -p.odds);
@@ -27,6 +28,7 @@ function StatBlock({ label, value, tone }: { label: string; value: string; tone:
 
 type ViewMode = "all" | "official" | "community";
 type EngineMode = "all" | "v5" | "legacy";
+type Section = "ledger" | "log";
 
 const isV5 = (p: PredC): boolean => (p.engineVersion ?? 4) >= 5;
 const isModelPriced = (p: PredC): boolean => p.priceSource === "model";
@@ -48,7 +50,13 @@ export default function RunsView({
   onSaveBet: (p: BetSavePayload) => Promise<string | null>;
   onRemoveBet: (predictionId: number) => Promise<void>;
 }) {
-  const [openId, setOpenId] = useState<number | null>(runs[0]?.id ?? null);
+  // Ledger = runs that released something new. Log = passes, re-runs that only repeated earlier picks, and
+  // failures (the rules live in ./ledger). The server keeps the two in separate windows, so idle runs can
+  // never push real ones out of the Ledger.
+  const [section, setSection] = useState<Section>("ledger");
+  const { ledger: ledgerRuns, log: logRuns } = useMemo(() => splitRuns(runs), [runs]);
+  const sectionRuns = section === "log" ? logRuns : ledgerRuns;
+  const [openId, setOpenId] = useState<number | null>(() => runs.find((r) => !isLogRun(r))?.id ?? null);
   const [publishing, setPublishing] = useState<number | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("all");
   const [engine, setEngine] = useState<EngineMode>("all");
@@ -72,7 +80,7 @@ export default function RunsView({
 
   // ---- filtering ----
   const filtered = useMemo(() => {
-    let list = runs;
+    let list = sectionRuns;
     if (viewMode === "official") list = list.filter((r) => r.isViewerRun);
     if (viewMode === "community") list = list.filter((r) => !r.isViewerRun);
     if (sportFilter) list = list.filter((r) => r.sports.includes(sportFilter));
@@ -85,7 +93,7 @@ export default function RunsView({
       );
     }
     return list;
-  }, [runs, viewMode, sportFilter, engine]);
+  }, [sectionRuns, viewMode, sportFilter, engine]);
 
   // ---- stats computation ----
   function computeStats(runList: RunC[]) {
@@ -113,8 +121,9 @@ export default function RunsView({
     return { wins: w, losses: l, strike: d ? (w / d) * 100 : null, pnl: pnlSum, pending: pendingCount, total: seen.size, modelPnl, modelN, leanW, leanL };
   }
 
-  const officialStats = useMemo(() => computeStats(runs.filter((r) => r.isViewerRun)), [runs, engine]); // eslint-disable-line react-hooks/exhaustive-deps
-  const communityStats = useMemo(() => computeStats(runs.filter((r) => !r.isViewerRun)), [runs, engine]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Records come from the Ledger only: a Log run releases nothing of its own, it just re-shows earlier picks.
+  const officialStats = useMemo(() => computeStats(ledgerRuns.filter((r) => r.isViewerRun)), [ledgerRuns, engine]); // eslint-disable-line react-hooks/exhaustive-deps
+  const communityStats = useMemo(() => computeStats(ledgerRuns.filter((r) => !r.isViewerRun)), [ledgerRuns, engine]); // eslint-disable-line react-hooks/exhaustive-deps
   const filteredStats = useMemo(() => computeStats(filtered), [filtered, engine]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Map of dedupeKey -> first run that staked it
@@ -145,9 +154,9 @@ export default function RunsView({
   // ---- sports that appear in runs ----
   const activeSports = useMemo(() => {
     const set = new Set<string>();
-    runs.forEach((r) => r.sports.forEach((s) => set.add(s)));
+    sectionRuns.forEach((r) => r.sports.forEach((s) => set.add(s)));
     return ALL_SPORT_FILTERS.filter((s) => set.has(s));
-  }, [runs]);
+  }, [sectionRuns]);
 
   async function sync() { await grade(); }
 
@@ -160,7 +169,7 @@ export default function RunsView({
         <h2 className="font-display text-2xl font-bold uppercase tracking-tight title-stroke">
           Prediction Ledger
         </h2>
-        <Chip tone="amber">{filtered.length} runs</Chip>
+        <Chip tone="amber">{filtered.length} {section === "log" ? "logged" : "runs"}</Chip>
         <button
           onClick={sync}
           disabled={syncing}
@@ -169,6 +178,29 @@ export default function RunsView({
           <RefreshCw className={cx("h-3.5 w-3.5", syncing && "animate-spin")} />
           {syncing ? "settling…" : "sync & grade"}
         </button>
+      </div>
+
+      {/* ============ Ledger / Log ============ */}
+      <div className="flex flex-wrap items-center gap-2">
+        {([
+          ["ledger", "Ledger", ledgerRuns.length, "Runs that released a new pick"],
+          ["log", "Log", logRuns.length, "Passes, re-runs that only repeated earlier picks, and failed runs"],
+        ] as const).map(([id, label, n, hint]) => (
+          <button
+            key={id}
+            title={hint}
+            aria-pressed={section === id}
+            onClick={() => setSection(id)}
+            className={cx(
+              "clip-tag border px-3 py-2 font-mono text-[10px] font-bold uppercase tracking-[0.14em] transition-all",
+              section === id
+                ? "border-[#ffb020]/45 bg-[#ffb020]/14 text-[#ffb020]"
+                : "border-white/10 bg-white/[0.03] text-[#5f7089] hover:border-white/25",
+            )}
+          >
+            {label} · {n}
+          </button>
+        ))}
       </div>
 
       {/* ============ View Mode Toggle ============ */}
@@ -243,6 +275,8 @@ export default function RunsView({
         ))}
       </div>
 
+      {section === "ledger" ? (
+      <>
       {/* ============ Stats Strip ============ */}
       <div className="flex flex-wrap gap-2">
         <StatBlock
@@ -289,12 +323,29 @@ export default function RunsView({
       <p className="font-mono text-[10px] leading-relaxed tracking-[0.04em] text-[#5f7089]">
         Units P/L here assumes <b className="text-[#8fa3bd]">every</b> pick was bet at its suggested stake and price. Model-priced picks (most MMA
         markets) use our price floor, so that part is hypothetical — your book sets the real number. What <i>you</i> actually bet, at the price you
-        actually got, lives in <b className="text-[#37ff8b]">My Bets</b>. (The record window is the latest 50 runs.)
+        actually got, lives in <b className="text-[#37ff8b]">My Bets</b>. (The record window is the latest 50 runs that released a pick;
+        passes and repeat-only runs live in the <b className="text-[#8fa3bd]">Log</b>.)
       </p>
+      </>
+      ) : (
+        <p className="font-mono text-[10px] leading-relaxed tracking-[0.04em] text-[#5f7089]">
+          The Log holds runs that <b className="text-[#8fa3bd]">released nothing new</b>: passes, re-runs where every pick was already on the
+          ledger, and failed runs. They never count toward the record — each pick lives once, in the run that first released it. Open one to
+          see why the council passed, or which earlier picks still stand.
+        </p>
+      )}
 
       {filtered.length === 0 && (
         <Panel className="p-10 text-center font-mono text-[12px] uppercase tracking-[0.2em] text-[#5f7089]">
-          {viewMode === "official" ? "no official runs found" : viewMode === "community" ? "no community runs found" : "no runs yet — hit run the cluster in the war room"}
+          {section === "log"
+            ? "nothing logged — every run so far released something"
+            : viewMode === "official"
+              ? "no official runs found"
+              : viewMode === "community"
+                ? "no community runs found"
+                : logRuns.length > 0 && ledgerRuns.length === 0
+                  ? "nothing released yet — the Log shows what the cluster passed on"
+                  : "no runs yet — hit run the cluster in the war room"}
         </Panel>
       )}
 
@@ -315,6 +366,11 @@ export default function RunsView({
           });
           const playRp = rp.filter((p) => p.units > 0);
           const leanCount = rp.length - playRp.length;
+          const kind = runKind(r);
+          // picks that were already on the ledger and are only re-shown on this run
+          const standing = rp.filter((p) => p.carried).length;
+          // plays this run released itself (a repeat-only run has none, so it no longer reads "0W – 0L")
+          const freshPlays = playRp.filter((p) => !p.carried);
           const rg = uniqueRp.filter((p) => p.units > 0 && p.outcome !== "pending" && !p.carried);
           const rw = rg.filter((p) => p.outcome === "win").length;
           const rl = rg.filter((p) => p.outcome === "loss").length;
@@ -344,9 +400,12 @@ export default function RunsView({
                     <span key={s} className={cx("clip-tag border px-1.5 py-px font-mono text-[8.5px] font-bold uppercase tracking-[0.12em]", isAdmin ? "border-[#39d5ff]/25 bg-[#39d5ff]/8 text-[#39d5ff]" : "border-white/10 bg-white/[0.04] text-[#5f7089]")}>{s}</span>
                   ))}
                 </span>
-                {playRp.length === 0 && r.status === "completed" && <Chip tone="amber">PASS · no play</Chip>}
+                {kind === "failed" && <Chip tone="red">FAILED</Chip>}
+                {kind === "nothing-new" && <Chip tone="cyan">NOTHING NEW · {standing} standing</Chip>}
+                {kind !== "nothing-new" && playRp.length === 0 && r.status === "completed" && <Chip tone="amber">PASS · no play</Chip>}
+                {kind === "released" && standing > 0 && <Chip tone="cyan">+{standing} standing</Chip>}
                 {leanCount > 0 && <Chip tone="violet">{leanCount} lean{leanCount === 1 ? "" : "s"}</Chip>}
-                {playRp.length > 0 && (
+                {freshPlays.length > 0 && (
                   <span className="font-mono text-[11px] font-bold">
                     <span className="text-[#37ff8b]">{rw}W</span>
                     <span className="text-[#3d4c63]"> – </span>
@@ -492,6 +551,8 @@ export default function RunsView({
                     <div className="font-mono text-[11px] uppercase tracking-[0.18em] text-[#5f7089]">
                       {r.status === "running"
                         ? "cluster still thinking"
+                        : r.status === "failed"
+                          ? "this run failed before it released anything — the agent transcript below may say why"
                         : r.council?.noPlay
                           ? "the council passed — nothing cleared the bar. See the near-misses above."
                           : "no bets released"}

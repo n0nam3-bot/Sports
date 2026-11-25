@@ -54,6 +54,8 @@ export interface CouncilC {
     games: number; analyzed: number; priced: number;
     gaps: { reason: string; n: number }[];
     candidates: number; plays: number; leans: number;
+    /** picks the council still endorses that were already on the ledger (shown, not re-staked) */
+    repeats?: number;
     bestEv: number | null; bar: number;
   };
 }
@@ -85,6 +87,8 @@ export interface RunC {
   id: number; slateDate: string; sports: string[]; markets?: string[]; status: string; mode: string;
   discipline?: string;
   isPublic?: number; isViewerRun?: boolean;
+  /** GET /api/runs only: the run released at least one NEW pick of its own. Passes and repeat-only runs are false → the Log. */
+  productive?: boolean;
   gamesFound: number; gamesAnalyzed: number; gamesSkipped: number;
   trace: TraceC[]; council: CouncilC; carried?: number[]; createdAt: string; completedAt: string | null;
   predictions: PredC[];

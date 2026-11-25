@@ -21,6 +21,7 @@ import {
 import WarRoom from "./war-room";
 import AgentsView from "./agents-view";
 import RunsView from "./runs-view";
+import { ledgerCount } from "./ledger";
 import { MyBetsView } from "./my-bets-view";
 import type { BetSavePayload } from "./bet-control";
 import { RELEASE_LABEL } from "@/lib/release";
@@ -384,7 +385,7 @@ export default function AppShell() {
           {([
             { id: "war", label: "War Room", short: "War Room", icon: Layers, count: slate ? slate.counts.pre : null },
             { id: "agents", label: "Agent Roster", short: "Roster", icon: Users, count: agentsData.length || null },
-            { id: "ledger", label: "Prediction Ledger", short: "Ledger", icon: ScrollText, count: runsData.filter((r) => r.status === "completed").length || null },
+            { id: "ledger", label: "Prediction Ledger", short: "Ledger", icon: ScrollText, count: ledgerCount(runsData) || null },
             { id: "bets", label: "My Bets", short: "My Bets", icon: Wallet, count: bets.length || null },
           ] as const).map((t) => (
             <button
