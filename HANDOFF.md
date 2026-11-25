@@ -7,10 +7,10 @@
 |---|---|
 | **Project** | NEONSLIP — an agent-cluster sports-betting intelligence app (Next.js 16 · React 19 · Tailwind 4 · PostgreSQL + Drizzle · TypeScript) |
 | **Repo** | https://github.com/n0nam3-bot/Sports (public, single branch `main`) |
-| **Release** | v5.1.0 "Market-Anchored Engine" (`src/lib/release.ts`, built 2026-10-25) · engine v5 · playbook v5 |
-| **Handoff written** | 2026-11-23 |
-| **Base commit** | `ba40a22` (2026-11-11 16:05 ET) — the last commit that changed code when this file was verified. Later uploads are the zips recorded in §22 |
-| **Health at that commit** | tests **153 / 153 pass** (~64 s) · `tsc` clean (app and tests) · `next build` OK · lint **4 errors + 1 warning** (K-04) |
+| **Release** | v5.2.0 "Market-Anchored Engine" (`src/lib/release.ts`, built 2026-11-24) · engine v5 · playbook v5 |
+| **Handoff written / last updated** | 2026-11-23 / 2026-11-24 |
+| **Base commit** | `041948d` (2026-11-24 05:53 ET) — HEAD when v5.2.0 was built. It only added this file and the README banner; the last commit that changed *code* is `ba40a22` (2026-11-11). The v5.2.0 changes are the §22 entry dated 2026-11-24: they reach git when the owner uploads that zip |
+| **Health at v5.2.0** | tests **160 / 160 pass** (~65 s) · `tsc` clean (app and tests) · `next build` OK · lint **4 errors + 1 warning**, unchanged (K-04) · the new Ledger/Log screens were also rendered from a real `/api/runs` payload in a simulated DOM (§15) — **not** seen in a browser |
 | **Verified with** | Node 22.23.5 / npm 10.9.9 (`package.json` has no `engines` pin). Fake ESPN only — **live ESPN and the live deployment were not reachable** from the verification sandbox |
 
 **Staleness check — do this first.** Run `git log --stat <base commit>..HEAD`. The commits after the base should match the newest entries in §22 (the owner's uploads of earlier zips; ignore commits that only touch `HANDOFF.md` / `README.md`). Anything else is **unrecorded work**: read it and update this file *before* relying on it. Also ask the owner whether the last zip delivered (by you or an earlier chat) has been uploaded — if not, have them attach it, otherwise you build on stale code and your whole-file delivery can overwrite theirs.
@@ -88,7 +88,7 @@ These are the rules that, if broken, cause real damage. Everything else in this 
 
    ```bash
    npm install
-   npm test                  # 153 tests, ~64 s — in-memory Postgres (PGlite) + a fake ESPN
+   npm test                  # 160 tests, ~65 s — in-memory Postgres (PGlite) + a fake ESPN
    npm run typecheck         # app only
    npm run typecheck:tests   # app + tests
    npx next build            # needs no DATABASE_URL
@@ -167,7 +167,8 @@ src/app/
 src/components/
   app-shell.tsx         tabs, all top-level state, launch + poll + grade flows
   war-room.tsx          control deck, kernel console, "the slip", leans, funnel, slate board
-  runs-view.tsx         the "Prediction Ledger" tab
+  runs-view.tsx         the "Prediction Ledger" tab (Ledger | Log toggle)
+  ledger.ts             Ledger-vs-Log rules (pure, tested): runKind · isLogRun · splitRuns · ledgerCount
   agents-view.tsx       the "Agent Roster" tab (+ admin buttons)
   my-bets-view.tsx · bet-control.tsx    personal tracker UI
   keys-modal.tsx · keys.ts              BYO-AI key vault, workspace id, fetch wrappers
@@ -195,7 +196,7 @@ src/lib/
   bets.ts          personal-tracker logic
   schema.ts        ensureSchema(): idempotent DDL bootstrap
   owner.ts · scrub.ts · release.ts
-tests/             13 test files, 153 tests, fake ESPN, helpers (§15)
+tests/             14 test files, 160 tests, fake ESPN, helpers (§15)
 ```
 
 ### Data flow of one run
@@ -325,9 +326,9 @@ How it works now (`engine.ts` §"What is already on the ledger", `selection.ts` 
 3. `selectCard({cands: pool, ledger: seed})`: existing bets **do not** consume this card's pick limit or daily cap, **but they do** count toward the per-game limits (pick count, 2u per game, clusters, contradictions).
 4. `selectCard({cands: all})` (no ledger) decides which already-released picks the council **still endorses** → `standing`. They are shown for context ("already on your ledger — not re-staked"), listed in `council.repeats`, put in `runs.carried`, and **never re-inserted or re-graded**.
 5. Headlines: `N PLAYS · Xu RISKED` · `NOTHING NEW — N EARLIER PICKS STAND` · `PASS — NO PLAY [· N LEANS]`. `council.noPlay` is true only when there are no new picks **and** no standing picks.
-6. `GET /api/runs` returns **two windows**: the last 50 *productive* runs (released ≥ 1 new pick, play or lean) and the last 100 *idle* runs, merged newest-first, each tagged `productive: boolean`. Idle runs (passes, "nothing new") belong in a **Log**, and a pile of them can never push real runs out of the Ledger. *(The backend is done and tested; the UI does not yet use `productive` — see K-01 and §17.)*
+6. `GET /api/runs` returns **two windows**: the last 50 *productive* runs (released ≥ 1 new pick, play or lean) and the last 100 *idle* runs, merged newest-first, each tagged `productive: boolean`. Idle runs (passes, "nothing new") belong in a **Log**, and a pile of them can never push real runs out of the Ledger. The Ledger tab's **Ledger | Log** toggle is driven by this flag (`src/components/ledger.ts`, §14).
 
-Tests: "re-running the same slate never duplicates a wager…", "duplicates do not use up a re-run's slots…", "runs that add nothing new go to the Log, not the Ledger…" in `tests/pipeline.integration.test.ts`; `selection.test.ts` and `mma-picks.test.ts` (cluster parity) cover the rest.
+Tests: "re-running the same slate never duplicates a wager…", "duplicates do not use up a re-run's slots…", "runs that add nothing new go to the Log, not the Ledger…" in `tests/pipeline.integration.test.ts`; `selection.test.ts` and `mma-picks.test.ts` (cluster parity) cover the rest; `tests/ledger.test.ts` and "the Ledger/Log split the UI draws agrees with what GET /api/runs really returns" pin the UI side against real payloads.
 
 ---
 
@@ -404,11 +405,13 @@ There are **no accounts**. The design deliberately trades authentication for zer
 
 ## 14. Frontend map and conventions
 
-Single page (`src/app/page.tsx` → `AppShell`), **four tabs**: **War Room** (control deck → kernel console → the slip → leans → slate board) · **Agent Roster** · **Prediction Ledger** · **My Bets**. `AppShell` owns all state and the three flows: *launch* (POST, then poll `/api/runs/[id]` every 1.3 s), *grade* (`/api/grade`, then reload runs/agents/bets), *bets* (save/remove/override).
+Single page (`src/app/page.tsx` → `AppShell`), **four tabs**: **War Room** (control deck → kernel console → the slip → leans → slate board) · **Agent Roster** · **Prediction Ledger** (with a **Ledger | Log** toggle) · **My Bets**. `AppShell` owns all state and the three flows: *launch* (POST, then poll `/api/runs/[id]` every 1.3 s), *grade* (`/api/grade`, then reload runs/agents/bets), *bets* (save/remove/override).
 
 - **Which run does the War Room show?** `cardForDate`: the active run once it finishes, else the **newest run in `runsData` with the same date and the same set of sports** (any owner — the ledger is shared). Plays are picks with `units > 0`; leans are `units === 0`.
+- **Ledger vs Log** (`src/components/ledger.ts` — pure and tested; the view only draws it). **Ledger** = runs that released something new, plus a run still in progress and a failed run that left picks behind. **Log** = passes, re-runs where every pick already stood ("nothing new") and failures that left nothing. The tab badge counts finished Ledger runs. Row labels come from `runKind()`: `FAILED`, `NOTHING NEW · N standing`, `PASS · no play`, `+N standing`. A Log run releases nothing of its own, so records come from Ledger runs only.
 - **Ledger stats** (`runs-view.tsx → computeStats`) dedupe by `dedupeKey`, tally leans separately, and keep model-priced P/L apart. Engine filter: all / v5 / legacy (v4).
-- **`components/types.ts`** hand-mirrors the API (kept free of server imports so the bundle stays clean). When an API field is added, add it here too — the compiler won't tell you it's missing (this is exactly how K-01 happened).
+- **After a re-run the slip shows the day's whole card** — this run's new plays plus earlier ones that still stand (flagged "already staked"). The commissioner's headline counts only what the run adds, so the exposure figure shows the total with a `Xu new · Yu on ledger` line, and the funnel adds `N already on your ledger`.
+- **`components/types.ts`** hand-mirrors the API (kept free of server imports so the bundle stays clean). When an API field is added, add it here too — the compiler won't tell you it's missing (the `productive` flag went unused until 5.2.0 for exactly this reason).
 - **Fetching**: use `vaultFetch` (attaches owner id + keys + LLM mode) or `ownerFetch` (owner id only — for endpoints that don't need keys, e.g. bets). Don't call `fetch` directly for the app's own API.
 - **Browser storage keys**: `neonslip.owner.v1`, `neonslip.vault.v1`, `neonslip.llm-mode.v1` (default **off**), `neonslip.discipline.v1`.
 - **Look and feel**: dark "neon capper" theme. Tokens in `globals.css` `@theme` — abyss `#03050b`, neon green `#37ff8b`, cyan `#39d5ff`, violet `#9d7bff`, magenta `#ff3d81`, amber `#ffb020`, red `#ff4757`; fonts Space Grotesk (display) + JetBrains Mono (data). Reuse the existing utility classes (`panel`, `panel-glow`, `clip-tag`, `rise`, `blink`, `title-stroke`, `scanlines`…) and primitives in `ui.tsx` (`Panel`, `Chip`, `OutcomeChip`, `CategoryChip`, `ProbBar`, `NeonButton`). Colours are written as arbitrary Tailwind hex values (`text-[#37ff8b]`). **Mobile first**: the owner mostly uses a phone — test narrow widths, keep tap targets large, keep tabs scrollable.
@@ -418,11 +421,12 @@ Single page (`src/app/page.tsx` → `AppShell`), **four tabs**: **War Room** (co
 
 ## 15. Testing
 
-`npm test` → `tsx --test "tests/*.test.ts"` (Node's built-in runner). **153 tests in 13 files, ~64 s.**
+`npm test` → `tsx --test "tests/*.test.ts"` (Node's built-in runner). **160 tests in 14 files, ~65 s.**
 
 | File | Tests | Covers |
 |---|---|---|
-| `pipeline.integration.test.ts` | 18 | The real pipeline on **real SQL (PGlite, in-memory Postgres)** against a **fake ESPN**: slate parsing, MMA stats flow, re-runs and the Ledger/Log windows, passes, LLM-review bounds, leans, grading every market, voiding, the bet tracker, API privacy, admin edits |
+| `pipeline.integration.test.ts` | 19 | The real pipeline on **real SQL (PGlite, in-memory Postgres)** against a **fake ESPN**: slate parsing, MMA stats flow, re-runs and the Ledger/Log windows, passes, LLM-review bounds, leans, grading every market, voiding, the bet tracker, API privacy, admin edits |
+| `ledger.test.ts` | 6 | the Ledger-vs-Log rules (pure): every kind of run, flag-absent fallback, failed / in-progress edge cases, the tab badge |
 | `selection.test.ts` | 25 | gates, caps, clusters, leans, near-misses, ledger-aware selection |
 | `team-model.test.ts` | 20 | market view, signals, candidate construction |
 | `mma-model.test.ts` · `mma-picks.test.ts` | 16 · 11 | joint model maths, floors, base-rate deviation, `clusterFor` parity |
@@ -438,6 +442,14 @@ Single page (`src/app/page.tsx` → `AppShell`), **four tabs**: **War Room** (co
 
 **Manual / visual run against the fake feed:** `NODE_OPTIONS="--import tsx --import ./tests/preload-fake-espn.ts" next start` — then `echo final > /tmp/fake-phase` to finish the games, `touch /tmp/fake-lean` for a lean, `touch /tmp/fake-extra` for a later new play. Needs `DATABASE_URL`.
 
+**Checking UI behaviour without a browser** (scratch work — don't commit it; the repo has no component tests). Used to verify the 5.2.0 screens:
+1. In a throwaway test, build the scenario on PGlite + fake ESPN and write the real `GET /api/runs` JSON to a file.
+2. Bundle the component: `npx esbuild src/components/<file>.tsx --bundle --platform=node --format=cjs --jsx=automatic --external:react --external:react-dom --external:react/jsx-runtime --outfile=/tmp/x.cjs`.
+3. In a scratch folder `npm i jsdom`; render with `react-dom/client` inside `React.act`, click with `dispatchEvent(new window.MouseEvent("click", { bubbles: true }))`, and assert on `document.body.textContent`.
+4. Run the same checks against the **old** file (`git show HEAD:<path>`) to prove they can fail.
+
+This sees text and structure — **not** layout or colour. Look at the deployed page on a phone for that.
+
 **What to add when you change…**
 
 | You changed | Add / update |
@@ -445,6 +457,7 @@ Single page (`src/app/page.tsx` → `AppShell`), **four tabs**: **War Room** (co
 | pricing, gates, sizing | `team-model` / `selection` / `edge` tests |
 | a market or category | `markets`, `mma-picks` (incl. cluster parity), `grading`, and a grading case in the integration test |
 | ledger / re-run behaviour | integration tests ("re-running…", "duplicates do not use up…", "Log, not the Ledger") |
+| the Ledger/Log screens or their rules | `ledger.test.ts` + the "Ledger/Log split the UI draws…" integration test; then render-check the component (below) |
 | the schema | `schema-upgrade.test.ts` |
 | an API field | the integration test that reads it **and** `components/types.ts` |
 
@@ -477,19 +490,17 @@ Everything above ran against **fake** ESPN. The live feed (unofficial, can chang
 ---
 ## 17. Where we left off
 
-**Last code change — 2026-11-11, baseline `ba40a22`.** Ledger-aware re-runs (§9). Files: `src/lib/candidate.ts` (`clusterFor`), `src/lib/engine.ts` (ledger load, pool, standing picks, `productive`), `src/lib/selection.ts` (`ledger` seed input), `src/db/schema.ts` (`funnel.repeats`), `src/app/api/runs/route.ts` (50 + 100 run windows, `productive`), plus tests in `pipeline.integration`, `selection`, `mma-picks` and the fake-ESPN files. The same day's burst also contains an accidental `Sports-main-wip.zip` upload that was deleted again (it remains in git history).
+**Last delivery — 2026-11-24, v5.2.0, built on `041948d`.** The Ledger / Log UI that the 2026-11-11 backend work was waiting for (resolves K-01, K-03, K-06).
+- `src/components/ledger.ts` *(new)* — the pure Ledger-vs-Log rules · `runs-view.tsx` — the **Ledger | Log** toggle and honest row labels · `types.ts` — `productive`, `funnel.repeats` · `app-shell.tsx` — the tab badge counts Ledger runs · `war-room.tsx` — funnel shows `N already on your ledger`, exposure shows `Xu new · Yu on ledger` · `src/lib/release.ts` — 5.2.0.
+- Tests: `tests/ledger.test.ts` *(new, 6)* and one new integration test ("the Ledger/Log split the UI draws agrees with what GET /api/runs really returns").
 
-**State of `main`:** green on tests / typecheck / build. `release.ts` still says 5.1.0 (K-06). Nothing is known to be broken in production, but **nothing was verified against the live site** (§2).
+**After the owner uploads it, confirm:** `/api/version` reports `5.2.0` with `ledgerAwareReruns` and `ledgerLogSplit`; the Ledger tab shows **Ledger · N | Log · N**; the Log lists passes, "NOTHING NEW" re-runs and failures.
 
-**Unfinished — the immediate next task: the Ledger / Log UI (K-01).** The backend returns idle runs and a `productive` flag precisely so the UI can keep real runs in the **Ledger** and push passes / "nothing new" runs to a **Log**. Nothing in the UI reads it yet. Suggested plan (small, UI-only):
-1. `src/components/types.ts`: add `productive?: boolean` to `RunC`, `repeats?: number` to `CouncilC["funnel"]`.
-2. `src/components/runs-view.tsx`: Ledger = runs where `productive !== false`; add a collapsed **Log** section for the rest (date · sports · headline · status: pass / nothing new / failed; no stats). The "N runs" chip counts Ledger runs. Stats can stay as they are — they already dedupe by `dedupeKey`.
-3. `src/components/app-shell.tsx`: the tab badge currently counts *every* completed run in `runsData` (now up to 150) — count Ledger runs only.
-4. `src/components/war-room.tsx` → `Funnel`: optionally show "+ N already on your ledger" from `funnel.repeats`. Decide the exposure label (K-03).
-5. Check the three states visually with the fake feed (§15): a **pass**, a **nothing-new re-run** (headline "NOTHING NEW — N EARLIER PICKS STAND"), and a **re-run with one new play** (`touch /tmp/fake-extra`). The integration tests assert the API, not how these render.
-6. Ship with `release.ts` → `5.2.0`, feature `ledgerAwareReruns: true`; update README and this file.
+**Defaults chosen without the owner** (change on request): idle runs live in a **toggle inside the Ledger tab** (not their own tab); the exposure figure shows **both** the slate total and the new-vs-on-ledger split; a run still in progress stays in the Ledger; a failed run that left picks behind stays in the Ledger too.
 
-Remember: `GET /api/runs/[id]` (the polled `activeRun`) does **not** carry `productive` / `isViewerRun`; only the list endpoint adds them.
+**Not verified:** how the new screens *look* in a browser or on a phone — they were checked from a real `/api/runs` payload in a simulated DOM (text and structure, not layout or colour; §15) — and the live deployment.
+
+**What's next (owner's call, §19):** the hygiene bundle — delete the 23 stale scripts (K-02), lint to green (K-04), a lockfile (K-05), README tidy (K-07), the public-feed chain (K-08) — or K-16 (a failed run blanks the War Room).
 
 ---
 
@@ -499,13 +510,10 @@ Severity: **Medium** = user-visible inconsistency or unfinished work · **Low** 
 
 | ID | Sev | Issue and evidence | Suggested fix |
 |---|---|---|---|
-| **K-01** | Medium | **Ledger/Log split not wired into the UI.** `/api/runs` returns idle runs + `productive`; `types.ts` has no `productive`, `runs-view.tsx` never reads it, there is no Log. The Ledger chip and tab badge now count passes and "nothing new" runs. | §17 plan |
 | **K-02** | Medium | **23 stale patch scripts in the repo root** (`add_force_improve.py`, `fix_*.py` ×4, `patch_*.py` ×17, `rewrite_scope.js`), all added in one commit on 2026-10-06 (`0c7d556`), before the v5 rewrite; nothing references them. A dry run on a scratch copy of HEAD: 18 are no-ops, but **5 would still modify live code** — `patch_agents.py` (removes ~128 lines of `agents.ts`, i.e. the built-in roster), `patch_mlb_props.py` (adds pitcher-strikeout props that nothing grades), `patch_ui.py`, `patch_agents_api.py`, `add_force_improve.py` (re-adds a "force improve" button that now means *reset*). **Never run them.** | Delete all 23. With a terminal: `git rm add_force_improve.py fix_*.py patch_*.py rewrite_scope.js`. Without: GitHub → open each file → ⋯ → *Delete file*. |
-| **K-03** | Low | After a re-run, the War Room's **exposure** and **avg win prob** are computed over every displayed play (new + standing), while the memo's "risking Xu" is new-picks-only → two different numbers on one screen. *Inferred from `war-room.tsx` vs `council.exposure`; not visually verified.* | Decide intent; e.g. show "new Xu · on ledger Yu". |
-| **K-04** | Low | **Lint is red: 4 errors + 1 warning**, all UI. `app-shell.tsx:73` (`react-hooks/refs` — `activeIdRef` is assigned during render and **never read**; delete lines 72–73), `:77`, `:225`, `:226` (`react-hooks/set-state-in-effect`), `layout.tsx:17` (custom Google Font link). `runs-view.tsx` has three `eslint-disable react-hooks/exhaustive-deps`. `next build` does not lint, so deploys aren't blocked. | Delete the dead ref; restructure the effects (or scope-disable with a reason); move fonts to `next/font`. |
+| **K-04** | Low | **Lint is red: 4 errors + 1 warning**, all UI. `app-shell.tsx:74` (`react-hooks/refs` — `activeIdRef` is assigned during render and **never read**; delete lines 73–74), `:78`, `:226`, `:227` (`react-hooks/set-state-in-effect`), `layout.tsx:17` (custom Google Font link). `runs-view.tsx` has three `eslint-disable react-hooks/exhaustive-deps`. `next build` does not lint, so deploys aren't blocked. | Delete the dead ref; restructure the effects (or scope-disable with a reason); move fonts to `next/font`. |
 | **K-05** | Low | **No `package-lock.json`** committed; three caret ranges (`lucide-react ^1.48.0`, `@electric-sql/pglite ^0.5.8`, `tsx ^4.23.15`); no `engines`. Installs can drift between deploys. | Generate a lockfile and commit it; add `"engines": {"node": ">=22"}`. |
-| **K-06** | Low | `release.ts` still **5.1.0 / built 2026-10-25** although the 2026-11-11 behaviour changed; `/api/version` can't prove that upload landed. | Bump to 5.2.0 with K-01; add the feature flag. |
-| **K-07** | Low | **README drift**: "Data — free + keyless" and "Stack" each appear twice (lines 126/169 and 138/173); model defaults are stale (README: `google/gemini-2.0-flash-001`, `gemini-2.0-flash`; code: `nvidia/nemotron-3-super-120b-a12b:free`, `gemini-2.5-flash`); `ADMIN_OWNER_ID` isn't mentioned; no mention of re-run behaviour or this file. | Edit README; add a pointer to `HANDOFF.md` at the top. |
+| **K-07** | Low | **README drift**: "Data — free + keyless" and "Stack" each appear twice (lines 128/171 and 140/175); model defaults are stale (README: `google/gemini-2.0-flash-001`, `gemini-2.0-flash`; code: `nvidia/nemotron-3-super-120b-a12b:free`, `gemini-2.5-flash`); `ADMIN_OWNER_ID` isn't mentioned; no mention of re-run behaviour or the Ledger/Log split. (The pointer to this file is already in.) | Edit the README. |
 | **K-08** | Low | **Dead public-feed chain**: `togglePublic()` in `runs-view.tsx` is never called (and `publishing`, `Globe`, `Lock` are unused); `GET /api/runs/public` is never fetched; the `is_public` column feeds only that endpoint. | Remove, or finish and wire it (owner's call). |
 | **K-09** | Decision | **Unauthenticated, unthrottled endpoints** that cost compute/money: `POST /api/runs` (uses *server* LLM keys if set), `POST /api/grade`, `GET /api/setup`, `GET /api/diag` (echoes DB error text + last upstream request). Acceptable for a private deployment. | Before sharing widely: rate limits, an optional access code, trim `/api/diag` output. |
 | **K-10** | Low | `gradePending()` has no concurrency guard (the per-row `UPDATE` has no `outcome = 'pending'` predicate). In a harness test two overlapping calls both reported `graded: 3` (6 for 3 picks); agent ratings were **not** double-credited (absolute writes) in lock-step or staggered runs, but a narrow window remains. | Guard the UPDATE (`... and outcome = 'pending'` + `returning`) and credit only rows actually changed. |
@@ -514,8 +522,11 @@ Severity: **Medium** = user-visible inconsistency or unfinished work · **Low** 
 | **K-13** | Info | **Three cluster definitions** that must agree: `clusterOf` (`team-model.ts`), `CLUSTER_OF` (`mma-picks.ts`), `clusterFor` (`candidate.ts`, used on stored picks). Guarded by a parity test in `mma-picks.test.ts`. | Consolidate into `clusterFor` when next touching markets. |
 | **K-14** | Risk | **ESPN is unofficial** (shape changes / blocking possible); MMA has no sportsbook prices; no NHL goalie data; thin college injuries. Everything was tested against a fake feed. | Watch `/api/diag`; keep parsers defensive; never invent data when a fetch fails (the engine passes the game instead). |
 | **K-15** | Info | **No CI and no scheduler.** Uploads go straight to deploy; the 64-second suite is never run automatically; grading happens only when someone taps "sync & grade". | See §19. |
+| **K-16** | Low | **A failed run blanks the War Room for its date + sports.** `cardForDate` (`app-shell.tsx`) takes the newest run for the date regardless of status, and the slip / pass panels render only for `completed`. Rendering the real `WarRoom` with a failed run as the card shows no slip, no pass panel and no failure message — the earlier good card is hidden until another run succeeds (same for a run stuck in `running`). *Found while verifying 5.2.0; pre-existing, not caused by it.* | Prefer the newest *completed* run for the slot and show a small "last run failed" note — the owner decides. |
 
-**Not verified in the session that wrote this file:** the live deployment and live ESPN (the sandbox could not reach them); how screens *render* in a browser (UI statements come from reading the code); real LLM providers (tests use a scripted fake); whether `ADMIN_OWNER_ID` / server LLM keys are set; behaviour of a very large slate within Vercel's 60 s limit.
+**Resolved:** K-01 Ledger/Log UI · K-03 exposure vs headline · K-06 release bump — all in 5.2.0 (2026-11-24). *IDs are never reused.*
+
+**Not verified in the session that wrote this file:** the live deployment and live ESPN (the sandbox could not reach them); how screens look in a browser or on a phone (the Ledger/Log screens were checked from real data in a simulated DOM — text and structure only; other UI statements come from reading the code); real LLM providers (tests use a scripted fake); whether `ADMIN_OWNER_ID` / server LLM keys are set; behaviour of a very large slate within Vercel's 60 s limit.
 
 ---
 
@@ -523,14 +534,14 @@ Severity: **Medium** = user-visible inconsistency or unfinished work · **Low** 
 
 *Reconstructed from the repo — what was in flight, what the README says it wants to learn, and the issues above. **Only the owner sets priorities**; confirm them at the start of a session. Items marked (proposed) are suggestions, not commitments.*
 
-### Now — finish what is in flight
-1. **Ledger / Log UI** (K-01) + exposure-label decision (K-03) + release bump to 5.2.0 (K-06). *Effort: small–medium, UI only.*
-
-### Next — hygiene, in one small delivery
-2. Delete the 23 stale scripts (K-02).
-3. Get lint to green (K-04); commit a lockfile + `engines` (K-05).
-4. Clean the README and add a pointer to this file (K-07); remove or finish the public-feed chain (K-08).
+### Now — hygiene, in one small delivery
+1. Delete the 23 stale scripts (K-02).
+2. Get lint to green (K-04); commit a lockfile + `engines` (K-05).
+3. Clean the README (K-07); remove or finish the public-feed chain (K-08).
+4. K-16 — don't let a failed run blank the War Room (needs a small owner decision on what to show).
 5. (proposed) **CI**: a GitHub Actions workflow running `npm ci`, `npm test`, `npm run typecheck:tests`, `npx next build` on every push — the owner has no terminal, so this is the only automatic safety net. Needs K-05 first.
+
+*Done in 5.2.0:* the Ledger / Log UI, the exposure reconciliation, the release bump.
 
 ### Later — product and engine (all proposed; need the owner's say)
 6. **Calibration and bar report**: from graded v5 rows, show realised win rate vs `modelProb` per bucket and *plays vs leans* ROI, so the owner can see with data whether the bar is too high or too low (the README introduces leans for exactly this). All data is already in `predictions`; needs a read-only endpoint + a view.
@@ -541,8 +552,8 @@ Severity: **Medium** = user-visible inconsistency or unfinished work · **Low** 
 11. Consolidate cluster definitions (K-13) and drop vestigial rosters (K-11).
 
 ### Decisions waiting on the owner
-- Where should idle runs live — a section inside the Ledger tab, or their own tab?
-- After a re-run, should "exposure" mean *new only* or *everything on the slate*?
+- Idle runs are now a **toggle inside the Ledger tab** — would you rather they had their own tab?
+- After a re-run the exposure figure shows **both** the slate total and the new-vs-on-ledger split — keep that, or show only one?
 - Keep or remove the public/community feed code (K-08)?
 - Is the site private or shared — how much protection (K-09)?
 - Priority: hygiene first, or features first?
@@ -588,11 +599,12 @@ Severity: **Medium** = user-visible inconsistency or unfinished work · **Low** 
 |---|---|
 | 2026-09-26 → 10-12 | **v1–v4 era.** First upload 09-26. LLM-heavy agent cluster with prompt "self-improvement" and a forced card; ESPN slate; BYO keys; `/api/diag`; MMA fighter stats (10-05). 23 one-shot patch scripts accumulate (10-06). |
 | 2026-10-19 | **v5.0.0 "Market-Anchored Engine"** — a rewrite: `team-model`, `selection`, `edge`, `health`, `discipline`, `review`, `candidate`, `grading`, `mma-model`, `mma-picks`, the **My Bets** tracker, `scrub`, schema upgrade; README rewritten. |
-| 2026-10-20 | The **test suite** and the **fake ESPN** (today's 153 tests grew from this). |
+| 2026-10-20 | The **test suite** and the **fake ESPN** (today's 160 tests grew from this). |
 | 2026-10-22 | Tuning (`discipline`, `engine`, `runs/public`). |
 | 2026-11-01 | **v5.1.0** — leans, funnel diagnostics, puck-line integrity; UI for leans and the funnel. |
-| 2026-11-11 | **Ledger-aware re-runs**; `/api/runs` Ledger/Log windows; the UI half not done (K-01). |
+| 2026-11-11 | **Ledger-aware re-runs**; `/api/runs` Ledger/Log windows; the UI half was not done at the time (K-01; finished in 5.2.0). |
 | 2026-11-23 | This handoff written. No code changed. Added a Known-issues audit (tests, typecheck, build and lint were run; the 23 patch scripts were dry-run on a scratch copy; the grading race was probed and **not** reproduced as a ratings double-credit). |
+| 2026-11-24 | **v5.2.0** — the Ledger / Log UI (K-01), exposure reconciled with the headline (K-03), release bump (K-06). First delivery as a zip; this file is refreshed with every delivery. |
 
 ### Session log (newest first — append an entry every session)
 
@@ -604,6 +616,13 @@ Severity: **Medium** = user-visible inconsistency or unfinished work · **Low** 
 - Release:   <version if bumped>
 - Left open: <what remains, and which K-/roadmap items it touches>
 ```
+
+### 2026-11-24 — Ledger / Log UI, v5.2.0
+- Changed:   `src/components/ledger.ts` (new) · `src/components/runs-view.tsx` · `src/components/types.ts` · `src/components/app-shell.tsx` · `src/components/war-room.tsx` · `src/lib/release.ts` · `tests/ledger.test.ts` (new) · `tests/pipeline.integration.test.ts` · `HANDOFF.md`
+- Why:       finish the UI half of the 2026-11-11 ledger-aware re-runs (K-01), reconcile exposure with the headline (K-03), bump the release (K-06)
+- Verified:  tests 160/160 · typecheck · typecheck:tests · `next build` · lint unchanged (4 errors + 1 warning) · a real `/api/runs` payload rendered in a simulated DOM (20 Ledger/Log checks + 12 War Room checks; the Ledger checks fail against the old view) · new tests fail when the helper is deliberately broken
+- Release:   5.2.0
+- Left open: K-02, K-04, K-05, K-07, K-08 hygiene; new K-16 (failed run blanks the War Room); layout/colour on a phone not seen
 
 ### 2026-11-23 — Handoff document created
 - Changed:   `HANDOFF.md` (new); `README.md` (one pointer line under the title — nothing else changed; optional upload)
