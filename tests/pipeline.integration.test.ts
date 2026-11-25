@@ -18,6 +18,7 @@ import { listAgents } from "../src/lib/agents";
 import { parseMmaMoneylines } from "../src/lib/fighter-stats";
 import { buildFilter } from "../src/lib/markets";
 import { evaluateTeamGame } from "../src/lib/team-model";
+import { isLogRun, runKind, splitRuns } from "../src/components/ledger";
 
 const OWNER = "wtestowner0001";
 const OTHER = "wsomebodyelse01";
@@ -303,7 +304,46 @@ test("a pass day is a first-class result: the run is KEPT (the old engine delete
   assert.deepEqual(body.run.predictions, []);
 });
 
-// ---------------------------------------------------------------------------
+test("the Ledger/Log split the UI draws agrees with what GET /api/runs really returns", async () => {
+  // Build the three kinds of run the real way, on a clean ledger: a release, a re-run that only repeats it,
+  // and (from the previous test) a pass day.
+  await db.delete(userBets);
+  await db.delete(predictions);
+  clearSlateCache();
+  const released = await newRun(["nba", "ufc", "dwcs"]);
+  await runPipeline(released, {}, OWNER, false);
+  const repeat = await newRun(["nba", "ufc", "dwcs"]);
+  await runPipeline(repeat, {}, OWNER, false);
+
+  const { GET } = await import("../src/app/api/runs/route");
+  type ApiRun = { id: number; status: string; productive: boolean; predictions: { carried: boolean }[]; council?: { noPlay?: boolean } };
+  const list = ((await (await GET(new NextRequest("http://x/api/runs"))).json()) as { runs: ApiRun[] }).runs;
+  const byId = new Map(list.map((r) => [r.id, r]));
+
+  const { ledger, log } = splitRuns(list);
+  assert.equal(ledger.length + log.length, list.length, "every run is in exactly one group");
+  assert.ok(ledger.some((r) => r.id === released), "the run that released picks is in the Ledger");
+  assert.ok(log.some((r) => r.id === repeat), "the re-run that only repeated them is in the Log");
+  assert.equal(runKind(byId.get(released)!), "released");
+  assert.equal(runKind(byId.get(repeat)!), "nothing-new");
+  assert.ok(byId.get(repeat)!.predictions.length > 0 && byId.get(repeat)!.predictions.every((p) => p.carried), "…and it shows only the picks that already stand");
+  assert.ok(log.some((r) => runKind(r) === "pass" && r.council?.noPlay === true), "a real pass day lands in the Log");
+
+  // The single-run endpoint has no `productive` flag, so the client derives it from the picks. On every real
+  // payload that derivation must agree with the server's own flag — a mismatch is how this UI was left behind once.
+  for (const r of list) assert.equal(isLogRun({ ...r, productive: undefined }), isLogRun(r), `run #${r.id}: derived and flagged classification differ`);
+
+  // The server's idea of "released something" is literal: pick rows of the run's own.
+  for (const r of list) {
+    const own = await db.select().from(predictions).where(eq(predictions.runId, r.id));
+    assert.equal(isLogRun(r), own.length === 0 && r.status !== "running", `run #${r.id}`);
+  }
+
+  await db.delete(userBets);
+  await db.delete(predictions);
+  clearSlateCache();
+});
+
 test("LLM review is bounded: it can trim a little, veto a few, and a hostile model cannot wipe out the card", async () => {
   const keys = { openrouter: "test-key" };
   const ids = (user: string, re: RegExp): number[] =>
