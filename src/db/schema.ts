@@ -271,7 +271,47 @@ export const userBets = pgTable(
   (t) => [uniqueIndex("user_bets_owner_prediction_idx").on(t.ownerId, t.predictionId)],
 );
 
+/**
+ * One forecast per game: our win probability for the side we favour, next to the vig-free market's.
+ * It is a PREDICTION, not a bet — nothing here carries a stake, and a game with no edge still gets one.
+ * The probability is the deterministic scout's (before any LLM review or card selection), so it does not
+ * depend on discipline, keys or who ran the slate. The latest pre-game forecast wins; once a game is
+ * graded the row is frozen. Graded forecasts feed the Scoreboard (model vs market, calibration).
+ */
+export const forecasts = pgTable(
+  "forecasts",
+  {
+    id: serial("id").primaryKey(),
+    slateDate: text("slate_date").notNull(),
+    sport: text("sport").notNull(),
+    eventId: text("event_id").notNull(),
+    matchup: text("matchup").notNull(),
+    startTime: timestamp("start_time", { withTimezone: true }).notNull(),
+    /** the side we favour: team or fighter name */
+    pick: text("pick").notNull(),
+    /** home | away */
+    side: text("side").notNull(),
+    /** our P(pick wins); always >= 0.5 because the pick is the side we favour */
+    pModel: real("p_model").notNull(),
+    /** the vig-free market's P(pick wins) — below 0.5 when the market favours the other side; null with no posted moneyline */
+    pMarket: real("p_market"),
+    /** one line of why: rest / injuries / ESPN projection, or fighter stats */
+    note: text("note").notNull().default(""),
+    /** the run that wrote it (informational; no foreign key) */
+    runId: integer("run_id"),
+    engineVersion: integer("engine_version").notNull().default(5),
+    /** pending | win | loss | void — "win" means the PICK won */
+    outcome: text("outcome").notNull().default("pending"),
+    finalScore: text("final_score"),
+    gradedAt: timestamp("graded_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("forecasts_game_idx").on(t.slateDate, t.sport, t.eventId)],
+);
+
 export type AgentRow = typeof agents.$inferSelect;
 export type RunRow = typeof runs.$inferSelect;
 export type PredictionRow = typeof predictions.$inferSelect;
 export type UserBetRow = typeof userBets.$inferSelect;
+export type ForecastRow = typeof forecasts.$inferSelect;
