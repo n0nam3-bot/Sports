@@ -19,6 +19,7 @@
  */
 
 import type { GameInfo } from "./espn";
+import type { GameForecast } from "./forecast";
 import type { BetCategory, GradeSpec, MmaGrade } from "../db/schema";
 import { allowsCandidate, mmaMarketKey, type MarketFilter } from "./markets";
 import { DISCIPLINES, type Discipline } from "./discipline";
@@ -129,6 +130,41 @@ const CLUSTER_OF: Record<MmaGrade["kind"], (m: MmaGrade) => string> = {
   sigstr: (m) => `sigstr:${(m as Extract<MmaGrade, { kind: "sigstr" }>).fighter}`,
   td: (m) => `td:${(m as Extract<MmaGrade, { kind: "td" }>).fighter}`,
 };
+
+/**
+ * Our win probability for the fighter we favour — a PREDICTION, not a bet (see forecast.ts).
+ * With no posted line it is the joint model's winner probability. If ESPN published a real moneyline it is
+ * the same blend the moneyline bet uses (mostly the vig-free market, partly our model), and that market
+ * probability is recorded alongside so the scoreboard can tell whether the model adds anything.
+ */
+export function forecastBout(g: GameInfo): GameForecast | null {
+  const c = g.combat;
+  if (!c) return null;
+  const m = c.dist;
+  const real = g.odds && g.odds.homeML != null && g.odds.awayML != null ? g.odds : null;
+  let pHome = m.pHome;
+  let pMktHome: number | null = null;
+  if (real) {
+    const [mkt] = devigTwoWay(real.homeML!, real.awayML!);
+    // a nonsense pair of prices (stale / one-sided) must not pose as a market
+    if (Number.isFinite(mkt) && mkt > 0.02 && mkt < 0.98) {
+      pMktHome = mkt;
+      pHome = mkt + BLEND_TO_MODEL * (m.pHome - mkt);
+    }
+  }
+  const home = pHome >= 0.5;
+  return {
+    eventId: g.eventId,
+    sport: g.sport,
+    matchup: g.matchup,
+    startTime: g.startTime,
+    side: home ? "home" : "away",
+    pick: home ? g.home.name : g.away.name,
+    pModel: home ? pHome : 1 - pHome,
+    pMarket: pMktHome == null ? null : home ? pMktHome : 1 - pMktHome,
+    note: m.statsUsed ? "ESPN career stats + records" : "records only (ESPN fighter stats unavailable)",
+  };
+}
 
 export function evaluateBout(
   g: GameInfo,

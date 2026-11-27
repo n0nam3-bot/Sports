@@ -177,5 +177,35 @@ async function runBootstrap(): Promise<void> {
       CREATE UNIQUE INDEX IF NOT EXISTS "user_bets_owner_prediction_idx"
         ON "user_bets" ("owner_id", "prediction_id");
     `);
+    // ---- v5.3: a forecast for every game, graded into the Scoreboard ----
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS "forecasts" (
+        "id" serial PRIMARY KEY NOT NULL,
+        "slate_date" text NOT NULL,
+        "sport" text NOT NULL,
+        "event_id" text NOT NULL,
+        "matchup" text NOT NULL,
+        "start_time" timestamp with time zone NOT NULL,
+        "pick" text NOT NULL,
+        "side" text NOT NULL,
+        "p_model" real NOT NULL,
+        "p_market" real,
+        "note" text DEFAULT '' NOT NULL,
+        "run_id" integer,
+        "engine_version" integer DEFAULT 5 NOT NULL,
+        "outcome" text DEFAULT 'pending' NOT NULL,
+        "final_score" text,
+        "graded_at" timestamp with time zone,
+        "created_at" timestamp with time zone DEFAULT now() NOT NULL,
+        "updated_at" timestamp with time zone DEFAULT now() NOT NULL
+      )
+    `);
+    await db.execute(sql`
+      CREATE UNIQUE INDEX IF NOT EXISTS "forecasts_game_idx"
+        ON "forecasts" ("slate_date", "sport", "event_id");
+    `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS "forecasts_pending_idx" ON "forecasts" ("outcome", "start_time");
+    `);
   }
 }

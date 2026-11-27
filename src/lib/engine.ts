@@ -1,6 +1,7 @@
 import { db } from "@/db";
 import {
   agents,
+  forecasts,
   predictions,
   runs,
   type CouncilDecision,
@@ -8,7 +9,7 @@ import {
   type MmaGrade,
   type TraceEntry,
 } from "@/db/schema";
-import { and, asc, eq, inArray, lt } from "drizzle-orm";
+import { and, asc, eq, inArray, lt, sql } from "drizzle-orm";
 import { ensureAgentsSeeded, settleAgentRatings, type GradedForRating } from "./agents";
 import { clusterFor, fmtOdds, pct, type Candidate } from "./candidate";
 import { DISCIPLINES, disciplineOf, type Discipline } from "./discipline";
@@ -30,12 +31,13 @@ import { describeFight, settleMma, settleTeam, type FightStatsLike, type Outcome
 import { loadHealth, NEUTRAL, type BucketHealth, type HealthReport } from "./health";
 import { targetFor, type KeyBag } from "./llm";
 import { buildFilter, COMBAT_CATEGORIES, type MarketFilter } from "./markets";
-import { evaluateBout } from "./mma-picks";
+import type { GameForecast } from "./forecast";
+import { evaluateBout, forecastBout } from "./mma-picks";
 import { HOUSE } from "./owner";
 import { applyReviews, collectReviews, type ReviewJob, type SourcedReview } from "./review";
 import { ensureSchema } from "./schema";
 import { MAX_UNITS_BOOK, MAX_UNITS_MODEL, nearMisses, selectCard, sizeOf } from "./selection";
-import { evaluateTeamGame, type GameIntel } from "./team-model";
+import { evaluateTeamGame, forecastTeam, type GameIntel } from "./team-model";
 
 export const revalidate = 0;
 
@@ -334,6 +336,9 @@ export async function runPipeline(
     if (!filter.mixed && [...filter.categories].some((c) => !COMBAT_CATEGORIES.has(c) && !["spread", "moneyline", "total"].includes(c))) {
       await trace(runId, { layer: "scout", agent: "PROPS", message: "Derived markets requested. ESPN's free feed has no posted line for these, so every one is a MODEL LINE with a line/price you must beat, held to a higher bar and staked smaller.", mood: "warn" });
     }
+
+    // ---------------- Forecasts: a prediction for every game, bet or no bet ----------------
+    await recordForecasts(runId, run.slateDate, pre, intels);
 
     // ---------------- Layer 3a: track-record gate ----------------
     let health: HealthReport;
@@ -662,6 +667,80 @@ export function legacyMma(category: string, g: GradeSpec): MmaGrade | null {
 const STALE_DAYS = 5;
 const STATS_GRACE_DAYS = 3;
 
+/**
+ * Record a forecast for every game the scouts could read: our win probability for the side we favour,
+ * next to the vig-free market's (see forecast.ts). It is a PREDICTION, not a bet — no stake, no selection.
+ * The number comes straight from the deterministic scout, before any LLM review or card selection, so it
+ * does not depend on discipline, keys or who ran the slate. The latest pre-game forecast wins; a graded
+ * row is frozen. Best-effort: the scoreboard must never be able to break a run.
+ */
+async function recordForecasts(
+  runId: number,
+  slateDate: string,
+  pre: GameInfo[],
+  intels: { g: GameInfo; intel: GameIntel }[],
+): Promise<void> {
+  try {
+    const intelOf = new Map(intels.map((x) => [x.g.eventId, x.intel]));
+    const byGame = new Map<string, GameForecast>();
+    for (const g of pre) {
+      const intel = intelOf.get(g.eventId);
+      const f = g.combat ? forecastBout(g) : intel ? forecastTeam(g, intel) : null;
+      if (f) byGame.set(`${f.sport}|${f.eventId}`, f); // one per game (a single INSERT can't touch a row twice)
+    }
+    const rows = [...byGame.values()];
+    if (rows.length) {
+      await db
+        .insert(forecasts)
+        .values(
+          rows.map((f) => ({
+            slateDate,
+            sport: f.sport,
+            eventId: f.eventId,
+            matchup: f.matchup,
+            startTime: new Date(f.startTime),
+            pick: f.pick,
+            side: f.side,
+            pModel: f.pModel,
+            pMarket: f.pMarket,
+            note: f.note,
+            runId,
+            engineVersion: ENGINE_VERSION,
+          })),
+        )
+        .onConflictDoUpdate({
+          target: [forecasts.slateDate, forecasts.sport, forecasts.eventId],
+          set: {
+            matchup: sql`excluded.matchup`,
+            startTime: sql`excluded.start_time`,
+            pick: sql`excluded.pick`,
+            side: sql`excluded.side`,
+            pModel: sql`excluded.p_model`,
+            pMarket: sql`excluded.p_market`,
+            note: sql`excluded.note`,
+            runId: sql`excluded.run_id`,
+            engineVersion: sql`excluded.engine_version`,
+            updatedAt: new Date(),
+          },
+          setWhere: eq(forecasts.outcome, "pending"), // a graded forecast is frozen
+        });
+    }
+    await trace(runId, {
+      layer: "system",
+      agent: "KERNEL",
+      message: `Forecast: a win probability for ${rows.length} of ${pre.length} upcoming games (ours next to the vig-free market's)${rows.length < pre.length ? ` — the rest have no posted moneyline or a readable board, so there is nothing to anchor to` : ""}. A forecast is a prediction, not a bet: stakes come only from the council's card.`,
+      mood: "info",
+    });
+  } catch (e) {
+    await trace(runId, {
+      layer: "system",
+      agent: "KERNEL",
+      message: `Forecast storage skipped (${e instanceof Error ? e.message.slice(0, 120) : "unknown error"}) — the run carries on.`,
+      mood: "warn",
+    });
+  }
+}
+
 export async function gradePending(): Promise<{
   graded: number;
   wins: number;
@@ -768,5 +847,65 @@ export async function gradePending(): Promise<{
 
   // settle agent ratings afterwards
   await settleAgentRatings(creditList);
+  return result;
+}
+
+/**
+ * Grade the forecasts of games that are now over — the Scoreboard's raw material. Same finals as the bets,
+ * but a forecast only asks one thing: did the side we favoured win? Price and stake never enter into it.
+ * A tie / draw / no-contest, or a game that never reports a result, is voided and the scoreboard ignores it.
+ */
+export async function gradeForecasts(): Promise<{ graded: number; wins: number; losses: number; voided: number }> {
+  await ensureSchema();
+  const pending = await db
+    .select()
+    .from(forecasts)
+    .where(and(eq(forecasts.outcome, "pending"), lt(forecasts.startTime, new Date(Date.now() - 45 * 60_000))))
+    .orderBy(asc(forecasts.id))
+    .limit(400);
+  const result = { graded: 0, wins: 0, losses: 0, voided: 0 };
+  if (!pending.length) return result;
+
+  const finalsCache = new Map<string, FinalScore[]>();
+  const record = async (id: number, outcome: "win" | "loss" | "void", finalScore: string): Promise<void> => {
+    await db
+      .update(forecasts)
+      .set({ outcome, finalScore, gradedAt: new Date() })
+      .where(and(eq(forecasts.id, id), eq(forecasts.outcome, "pending"))); // never regrade
+    if (outcome === "void") result.voided++;
+    else {
+      result.graded++;
+      if (outcome === "win") result.wins++;
+      else result.losses++;
+    }
+  };
+
+  for (const fc of pending) {
+    try {
+      const key = `${fc.slateDate}|${fc.sport}`;
+      if (!finalsCache.has(key)) finalsCache.set(key, await getFinals(fc.slateDate, fc.sport));
+      const fin = finalsCache.get(key)!.find((x) => x.eventId === fc.eventId);
+      const ageDays = (Date.now() - fc.startTime.getTime()) / 86_400_000;
+      if (!fin || fin.status !== "post") {
+        if (ageDays > STALE_DAYS) await record(fc.id, "void", `No result after ${STALE_DAYS} days — voided`);
+        continue;
+      }
+      const side = fc.side === "away" ? "away" : "home";
+      if (COMBAT_SPORTS.has(fc.sport)) {
+        const o = settleMma({ kind: "ml", fighter: side }, fin, null);
+        if (o == null) continue; // winner not published yet — retry next sync
+        await record(fc.id, o === "win" || o === "loss" ? o : "void", describeFight(fin, null));
+        continue;
+      }
+      const settled = settleTeam("moneyline", { side, line: null }, fin);
+      if (!settled) {
+        if (ageDays > STALE_DAYS) await record(fc.id, "void", "Result data never became available — voided");
+        continue;
+      }
+      await record(fc.id, settled.outcome === "win" || settled.outcome === "loss" ? settled.outcome : "void", settled.finalScore);
+    } catch {
+      /* leave it pending; the next sync retries */
+    }
+  }
   return result;
 }

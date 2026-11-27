@@ -21,6 +21,7 @@
  */
 
 import type { GameInfo } from "./espn";
+import type { GameForecast } from "./forecast";
 import type { BetCategory, GradeSpec } from "../db/schema";
 import {
   clamp,
@@ -430,6 +431,32 @@ const adjTxt = (intel: GameIntel): string => {
   if (intel.predAdj) parts.push(`ESPN ${signed(intel.predAdj)}`);
   return parts.length ? parts.join(", ") : "no situational edge";
 };
+
+/**
+ * Our win probability for the side we favour — a PREDICTION, not a bet (see forecast.ts).
+ * It is the number the moneyline candidate is built from, taken straight from the scout: before any LLM
+ * review, discipline or card selection, so it does not depend on who ran the slate or how.
+ * Null when the game could not be read (no lines, suspect data, injury report not fetched) or has no posted
+ * moneyline — with no moneyline there is no market probability to anchor to.
+ */
+export function forecastTeam(g: GameInfo, intel: GameIntel): GameForecast | null {
+  const P = PARAMS[g.sport];
+  const pMktHome = intel.market.pMlHome;
+  if (!P || !intel.usable || pMktHome == null) return null;
+  const pHome = shiftProb(pMktHome, intel.dm, P.sigmaMargin);
+  const home = pHome >= 0.5;
+  return {
+    eventId: g.eventId,
+    sport: g.sport,
+    matchup: g.matchup,
+    startTime: g.startTime,
+    side: home ? "home" : "away",
+    pick: home ? g.home.name : g.away.name,
+    pModel: home ? pHome : 1 - pHome,
+    pMarket: home ? pMktHome : 1 - pMktHome,
+    note: adjTxt(intel),
+  };
+}
 
 export function evaluateTeamGame(g: GameInfo, filter: MarketFilter, nextId: () => number): TeamEval {
   const intel = readGame(g);

@@ -1,7 +1,7 @@
 export const RELEASE = {
-  version: "5.2.0",
+  version: "5.3.0",
   name: "Market-Anchored Engine",
-  built: "2026-11-24",
+  built: "2026-11-26",
   sports: ["NBA", "NFL", "NCAAF", "NCAAB", "MLB", "NHL", "UFC", "DWCS", "PFL"],
   features: {
     // engine
@@ -16,6 +16,7 @@ export const RELEASE = {
     funnelDiagnostics: true,
     puckLineIntegrity: true,
     ledgerAwareReruns: true,
+    forecastEveryGame: true,
     // MMA
     mmaJointModel: true,
     mmaMoneyline: true,
@@ -34,6 +35,7 @@ export const RELEASE = {
     privateWorkspaces: true,
     duplicateProtection: true,
     ledgerLogSplit: true,
+    scoreboard: true,
     byoAiKeys: true,
   },
   mmaOdds: {
