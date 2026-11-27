@@ -53,6 +53,20 @@ Each ±1.5 side is therefore cross-checked against the same team's moneyline (th
 moneyline favourite unless the game is a coin flip, and a puck/run line with a missing price is skipped rather
 than defaulted to −110. A game that fails these checks is passed on entirely.
 
+### Forecasts — a prediction for every game, and a scoreboard that keeps us honest
+Most games have no edge, so most games get no bet — but every game the engine can price still gets a **forecast**:
+our win probability for the side we favour, next to the vig-free market's own number (War Room →
+*All Games // forecast*). A forecast is a prediction, **not** a bet; a stake exists only where the card says
+**BET**. It is the deterministic scout's number, before any AI review or card selection, so it doesn't depend on
+the discipline setting or on who ran the slate. A game with no posted moneyline, or a board that can't be read,
+gets none — there is nothing to anchor to.
+
+Every forecast is graded once its game finishes (tap **sync & grade**). The **Scoreboard** tab scores them with the
+Brier score and — the point — compares them with the market's probabilities on the *same games*, with a margin of
+error. It says "too early" until there are 30+ games with a market price, and it only says we "beat the market" when
+the numbers support it. It also shows whether our percentages mean what they say (do our 60% calls win about 60%?)
+and the latest results, so you can check it against real games.
+
 ### Price provenance — book price vs model price
 Every pick says where its number came from:
 - **BOOK PRICE** — a posted sportsbook price (spread, moneyline, game total). EV is measured against it.
@@ -135,7 +149,9 @@ takedown statistics). Rest intelligence is inferred from the previous 3 days of 
 ## Realistic expectations
 No model sustains anything near 100%. Sportsbook prices are efficient; a very good bettor wins ~54–58% at
 standard −110 juice, and break-even there is 52.4%. Win rate and profit are different things — laying −400
-wins often and still loses money. Measure **units**, not win%, and use My Bets for your own record.
+wins often and still loses money. Measure **units**, not win%, and use My Bets for your own record. The
+**Scoreboard** is how you find out, with data, whether the engine's probabilities are better than the market's —
+and it will say plainly if they only match it, or trail it.
 
 ## Stack
 Next.js 16 · React 19 · Tailwind 4 · PostgreSQL + Drizzle · TypeScript.
