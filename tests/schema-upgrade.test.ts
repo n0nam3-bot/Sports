@@ -36,6 +36,7 @@ test("the legacy database really lacks the v5 columns (so the test means somethi
   assert.ok(!names.includes("engine_version"));
   const t = await rows(`SELECT table_name FROM information_schema.tables WHERE table_name='user_bets'`);
   assert.equal(t.length, 0);
+  assert.equal((await rows(`SELECT 1 FROM information_schema.tables WHERE table_name='forecasts'`)).length, 0, "no forecasts table before the upgrade");
 });
 
 test("ensureSchema upgrades a v4 database in place, keeping every legacy row", async () => {
@@ -48,6 +49,7 @@ test("ensureSchema upgrades a v4 database in place, keeping every legacy row", a
   assert.ok((await rows(`SELECT column_name FROM information_schema.columns WHERE table_name='runs'`)).some((c) => c.column_name === "discipline"));
   assert.ok((await rows(`SELECT column_name FROM information_schema.columns WHERE table_name='agents'`)).some((c) => c.column_name === "prompt_version"));
   assert.equal((await rows(`SELECT 1 FROM information_schema.tables WHERE table_name='user_bets'`)).length, 1);
+  assert.equal((await rows(`SELECT 1 FROM information_schema.tables WHERE table_name='forecasts'`)).length, 1, "the forecasts table is created");
 
   // legacy prediction survived, flagged as a v4 book-priced pick
   const [p] = await rows(`SELECT pick, outcome, engine_version, price_source, model_prob, min_price, confidence FROM predictions WHERE dedupe_key='legacy-key-1'`);
@@ -92,4 +94,23 @@ test("the pre-existing prediction is still readable through the app's own schema
   assert.equal(all[0].engineVersion, 4);
   assert.equal(all[0].modelProb, null);
   assert.deepEqual(all[0].agents.slice(0, 2), ["QUANT", "MEDIC"]);
+});
+
+test("forecasts: created on upgrade, one row per game, readable through the app's own schema", async () => {
+  const { db } = await import("../src/db");
+  const { forecasts } = await import("../src/db/schema");
+  const cols = (await rows(`SELECT column_name FROM information_schema.columns WHERE table_name='forecasts'`)).map((c) => c.column_name);
+  for (const c of ["slate_date", "sport", "event_id", "matchup", "start_time", "pick", "side", "p_model", "p_market", "note", "run_id", "engine_version", "outcome", "final_score", "graded_at", "created_at", "updated_at"]) assert.ok(cols.includes(c), c);
+  assert.equal((await rows(`SELECT 1 FROM pg_indexes WHERE indexname='forecasts_game_idx'`)).length, 1);
+  assert.equal((await rows(`SELECT 1 FROM pg_indexes WHERE indexname='forecasts_pending_idx'`)).length, 1);
+
+  const row = { slateDate: "2026-11-24", sport: "nba", eventId: "E9", matchup: "AAA @ BBB", startTime: new Date("2026-11-24T23:00:00Z"), pick: "BBB", side: "home", pModel: 0.62, pMarket: null };
+  await db.insert(forecasts).values(row);
+  const [back] = await db.select().from(forecasts);
+  assert.equal(back.pModel, 0.62);
+  assert.equal(back.pMarket, null, "no market number is stored as null, not as a guess");
+  assert.equal(back.outcome, "pending");
+  assert.equal(back.engineVersion, 5);
+  assert.equal(back.note, "");
+  await assert.rejects(() => db.insert(forecasts).values(row), "one forecast per game");
 });

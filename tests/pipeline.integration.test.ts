@@ -10,14 +10,16 @@ import { NextRequest } from "next/server";
 
 import { installFakeEspn, newState, type FakeState } from "./fake-espn";
 import { db } from "../src/db";
-import { agents, predictions, runs, userBets, type GradeSpec, type MmaGrade } from "../src/db/schema";
+import { agents, forecasts, predictions, runs, userBets, type GradeSpec, type MmaGrade } from "../src/db/schema";
 import { ensureSchema } from "../src/lib/schema";
-import { cachedSlate, clearSlateCache, dedupeKeyFor, gradePending, runPipeline } from "../src/lib/engine";
+import { cachedSlate, clearSlateCache, dedupeKeyFor, gradeForecasts, gradePending, runPipeline } from "../src/lib/engine";
+import { getFinals } from "../src/lib/espn";
 import { listBets, upsertBet, setBetResult, deleteBet, betsToCsv } from "../src/lib/bets";
 import { listAgents } from "../src/lib/agents";
 import { parseMmaMoneylines } from "../src/lib/fighter-stats";
 import { buildFilter } from "../src/lib/markets";
-import { evaluateTeamGame } from "../src/lib/team-model";
+import { evaluateTeamGame, readGame } from "../src/lib/team-model";
+import { forecastBout } from "../src/lib/mma-picks";
 import { isLogRun, runKind, splitRuns } from "../src/components/ledger";
 
 const OWNER = "wtestowner0001";
@@ -343,6 +345,244 @@ test("the Ledger/Log split the UI draws agrees with what GET /api/runs really re
   await db.delete(predictions);
   clearSlateCache();
 });
+
+// ---------------------------------------------------------------------------
+// Forecasts: a prediction for every game, graded into the Scoreboard
+// ---------------------------------------------------------------------------
+
+/** Run the slate, then make every game "started 4 hours ago and now final". */
+async function runThenFinish(sports = ["nba", "ufc", "dwcs"]): Promise<number> {
+  await db.delete(userBets);
+  await db.delete(predictions);
+  await db.delete(forecasts);
+  state.phase = "pre";
+  clearSlateCache();
+  const id = await newRun(sports);
+  await runPipeline(id, {}, OWNER, false);
+  // The loader has wall-clock budgets: on a machine that stalls it stops enriching and games get passed. Say so
+  // plainly instead of failing confusingly further down.
+  assert.ok((await db.select().from(forecasts)).length >= 5, "the slate did not load in full (a starved machine can blow the loader's time budget) — re-run");
+  // Fake kick-offs are fixed clock times, so whether a bet is old enough to grade would depend on the time of day.
+  // Put every game 4 hours in the past, bets and forecasts alike.
+  const past = new Date(Date.now() - 4 * 3600_000);
+  await db.update(forecasts).set({ startTime: past });
+  await db.update(predictions).set({ startTime: past });
+  state.phase = "final";
+  clearSlateCache();
+  return id;
+}
+const backToPre = () => {
+  state.phase = "pre";
+  clearSlateCache();
+};
+/** Wrap a test that flips the fake feed to "final": the feed is ALWAYS put back, even when an assertion fails,
+ *  so one failure can never cascade into every later test (which all assume "pre"). */
+const afterGames = (fn: () => Promise<void>) => async (): Promise<void> => {
+  try {
+    await fn();
+  } finally {
+    backToPre();
+  }
+};
+
+test("forecast: every priced game gets a prediction — bet or no bet — and a game that can't be read gets none", async () => {
+  await db.delete(userBets);
+  await db.delete(predictions);
+  await db.delete(forecasts);
+  state.phase = "pre";
+  clearSlateCache();
+  const sports = ["nba", "ufc", "dwcs"];
+  const id = await newRun(sports);
+  await runPipeline(id, {}, OWNER, false);
+
+  // what the scouts could read, worked out from the slate itself
+  const { games } = await cachedSlate(D, sports);
+  const readable = games
+    .filter((g) => g.status === "pre")
+    .filter((g) => (g.combat ? forecastBout(g) != null : readGame(g).usable && readGame(g).market.pMlHome != null));
+  const rows = await db.select().from(forecasts).orderBy(asc(forecasts.id));
+  assert.ok(rows.length >= 5, `expected the 2 NBA + 2 UFC + 1 DWCS games, got ${rows.length}`);
+  assert.deepEqual([...new Set(rows.map((r) => r.eventId))].sort(), readable.map((g) => g.eventId).sort(), "exactly the readable games, once each");
+  assert.ok(!rows.some((r) => r.eventId === "401003"), "the game whose injury report was never fetched is passed, not guessed at");
+
+  // it really was stored by the run, not silently skipped
+  const trace = (await runRow(id)).trace as { message: string }[];
+  assert.ok(trace.some((t) => /Forecast: a win probability for \d+ of \d+ upcoming games/.test(t.message)));
+  assert.ok(!trace.some((t) => /Forecast storage skipped/.test(t.message)));
+
+  // the point of the feature: games with NO bet still carry a prediction
+  const betEvents = new Set((await allPreds()).map((p) => p.eventId));
+  assert.ok(rows.some((r) => !betEvents.has(r.eventId)), "at least one game has a forecast but no bet on it");
+  assert.ok(betEvents.size > 0 && rows.length > betEvents.size, "forecasts cover more games than bets do");
+
+  for (const r of rows) {
+    const g = games.find((x) => x.eventId === r.eventId)!;
+    assert.ok(r.pModel >= 0.5 && r.pModel < 1, `${r.matchup}: ${r.pModel}`);
+    assert.equal(r.pick, r.side === "home" ? g.home.name : g.away.name);
+    assert.equal(r.matchup, g.matchup);
+    assert.equal(r.outcome, "pending");
+    assert.equal(r.slateDate, D);
+    assert.equal(r.engineVersion, 5);
+    assert.equal(r.runId, id);
+    assert.equal(g.status, "pre", "only games that have not started are forecast");
+  }
+  for (const r of rows.filter((x) => x.sport === "nba")) assert.ok(r.pMarket != null && r.pMarket > 0 && r.pMarket < 1, "team games carry the vig-free market probability");
+  for (const r of rows.filter((x) => x.sport !== "nba")) assert.equal(r.pMarket, null, "no posted fight moneyline in this feed, so no market number is invented");
+});
+
+test("forecast: re-runs update in place, never duplicate, ignore discipline, and a late game adds exactly one row", async () => {
+  await db.delete(predictions);
+  await db.delete(forecasts);
+  clearSlateCache();
+  await runPipeline(await newRun(["nba", "ufc", "dwcs"], [], "strict"), {}, OWNER, false);
+  const first = await db.select().from(forecasts).orderBy(asc(forecasts.eventId));
+  const secondRun = await newRun(["nba", "ufc", "dwcs"], [], "loose");
+  await runPipeline(secondRun, {}, OWNER, false);
+  const second = await db.select().from(forecasts).orderBy(asc(forecasts.eventId));
+
+  assert.equal(second.length, first.length, "same games, same rows");
+  for (const [i, f] of first.entries()) {
+    assert.equal(second[i].id, f.id, "updated in place");
+    assert.equal(second[i].pModel, f.pModel, "strict vs loose must not move a probability — the forecast is the scout's, before selection");
+    assert.equal(second[i].pick, f.pick);
+    assert.equal(second[i].runId, secondRun, "the latest run owns the row");
+  }
+
+  state.extraEdgeGame = true; // a fifth NBA game appears
+  clearSlateCache();
+  await runPipeline(await newRun(["nba", "ufc", "dwcs"]), {}, OWNER, false);
+  const third = await db.select().from(forecasts);
+  assert.equal(third.length, first.length + 1, "the new game gets one new row; nothing else is duplicated");
+  state.extraEdgeGame = false;
+  clearSlateCache();
+});
+
+test("forecast: storing them is best-effort — a failure can never break the run or its picks", async () => {
+  await db.delete(predictions);
+  await db.delete(forecasts);
+  clearSlateCache();
+  await db.execute(sql`alter table forecasts add constraint forecasts_test_block check (p_model < 0)`);
+  let id: number;
+  try {
+    id = await newRun(["nba", "ufc", "dwcs"]);
+    await runPipeline(id, {}, OWNER, false);
+  } finally {
+    await db.execute(sql`alter table forecasts drop constraint forecasts_test_block`);
+  }
+  const run = await runRow(id);
+  assert.equal(run.status, "completed", "the run finished");
+  assert.ok((await allPreds()).length > 0, "and still released its picks");
+  assert.equal((await db.select().from(forecasts)).length, 0, "nothing was stored");
+  assert.ok((run.trace as { message: string }[]).some((t) => /Forecast storage skipped/.test(t.message)), "and it said so");
+});
+
+test("forecast: finished games are graded against the real result, once — independently re-derived from the finals", afterGames(async () => {
+  await runThenFinish();
+  const stored = await db.select().from(forecasts).orderBy(asc(forecasts.id));
+  assert.ok(stored.length >= 5);
+
+  const res = await gradeForecasts();
+  assert.equal(res.graded, stored.length, "every game was final");
+  assert.equal(res.wins + res.losses, res.graded);
+  assert.equal(res.voided, 0);
+
+  // work out each result straight from the fake feed's finals, not through the grader's own settle functions
+  const finals = new Map<string, Awaited<ReturnType<typeof getFinals>>[number]>();
+  for (const sport of ["nba", "ufc", "dwcs"]) for (const f of await getFinals(D, sport)) finals.set(f.eventId, f);
+  const after = await db.select().from(forecasts).orderBy(asc(forecasts.id));
+  for (const r of after) {
+    const fin = finals.get(r.eventId)!;
+    const homeWon = r.sport === "nba" ? fin.homeScore > fin.awayScore : fin.homeScore === 1; // a fight's winner is flagged 1
+    const pickedHome = r.side === "home";
+    assert.equal(r.outcome, pickedHome === homeWon ? "win" : "loss", `${r.matchup}: picked ${r.pick}`);
+    assert.ok(r.finalScore && r.finalScore.length > 0, "the final is recorded");
+    assert.ok(r.gradedAt);
+  }
+
+  const again = await gradeForecasts();
+  assert.equal(again.graded + again.voided, 0, "grading is idempotent — nothing is graded twice");
+}));
+
+test("forecast: a graded forecast is frozen; a game with no result is left alone, then voided after five days", afterGames(async () => {
+  await runThenFinish();
+  await gradeForecasts();
+  const target = (await db.select().from(forecasts).orderBy(asc(forecasts.id)))[0];
+  await db.update(forecasts).set({ pModel: 0.5123 }).where(eq(forecasts.id, target.id)); // a marker a re-run would overwrite
+
+  // the slate is "pre" again and a fresh run tries to write the same games
+  backToPre();
+  await runPipeline(await newRun(["nba", "ufc", "dwcs"]), {}, OWNER, false);
+  const kept = (await db.select().from(forecasts).where(eq(forecasts.id, target.id)))[0];
+  assert.equal(kept.pModel, 0.5123, "a graded forecast must not be rewritten");
+  assert.ok(kept.outcome === "win" || kept.outcome === "loss");
+
+  const base = { slateDate: D, sport: "nba", matchup: "AAA @ BBB", pick: "BBB", side: "home", pModel: 0.6, pMarket: 0.58, note: "" };
+  await db.insert(forecasts).values([
+    { ...base, eventId: "no-result-yet", startTime: new Date(Date.now() - 2 * 3600_000) },
+    { ...base, eventId: "never-reported", startTime: new Date(Date.now() - 6 * 86_400_000) },
+  ]);
+  state.phase = "final";
+  clearSlateCache();
+  const res = await gradeForecasts();
+  const get = async (e: string) => (await db.select().from(forecasts).where(eq(forecasts.eventId, e)))[0];
+  assert.equal((await get("no-result-yet")).outcome, "pending", "two hours ago with no result is just not reported yet");
+  assert.equal((await get("never-reported")).outcome, "void", "six days with no result is refunded, like a bet");
+  assert.equal(res.voided, 1);
+}));
+
+test("forecast API: the day's predictions are filtered and validated, and the scoreboard adds up", afterGames(async () => {
+  await runThenFinish();
+  await gradeForecasts();
+  const { GET: list } = await import("../src/app/api/forecasts/route");
+  const { GET: board } = await import("../src/app/api/scoreboard/route");
+  const call = async (url: string) => list(new NextRequest(`http://x${url}`));
+
+  assert.equal((await call("/api/forecasts?date=nope&sports=nba")).status, 400);
+  assert.equal((await call(`/api/forecasts?date=${D}`)).status, 400, "no sports");
+  assert.equal((await call(`/api/forecasts?date=${D}&sports=curling`)).status, 400, "unknown sports are dropped, leaving none");
+
+  const all = (await (await call(`/api/forecasts?date=${D}&sports=nba,ufc,dwcs`)).json()) as { forecasts: { sport: string; startTime: string; outcome: string; pModel: number }[] };
+  const nba = (await (await call(`/api/forecasts?date=${D}&sports=nba`)).json()) as { forecasts: { sport: string }[] };
+  assert.ok(all.forecasts.length >= 5);
+  assert.ok(nba.forecasts.length >= 2 && nba.forecasts.every((f) => f.sport === "nba"), "filtered by sport");
+  const times = all.forecasts.map((f) => f.startTime);
+  assert.deepEqual(times, [...times].sort(), "in start-time order");
+  assert.ok(all.forecasts.every((f) => f.outcome === "win" || f.outcome === "loss"));
+
+  // the scoreboard, cross-checked against numbers worked out here from the stored rows
+  const rows = await db.select().from(forecasts);
+  const yv = (r: (typeof rows)[number]) => (r.outcome === "win" ? 1 : 0);
+  const b = (await (await board()).json()) as {
+    since: string; pending: number;
+    overall: { n: number; hits: number; brier: number; nPaired: number; brierModel: number; brierMarket: number; verdict: string };
+    bySport: { sport: string; score: { n: number } }[];
+    calibration: { n: number }[];
+    recent: unknown[];
+  };
+  assert.equal(b.overall.n, rows.length);
+  assert.equal(b.overall.hits, rows.filter((r) => r.outcome === "win").length);
+  assert.ok(Math.abs(b.overall.brier - rows.reduce((s, r) => s + (r.pModel - yv(r)) ** 2, 0) / rows.length) < 1e-9);
+  const paired = rows.filter((r) => r.pMarket != null);
+  assert.equal(b.overall.nPaired, paired.length);
+  assert.ok(Math.abs(b.overall.brierMarket - paired.reduce((s, r) => s + (r.pMarket! - yv(r)) ** 2, 0) / paired.length) < 1e-9);
+  assert.equal(b.bySport.reduce((s, x) => s + x.score.n, 0), rows.length);
+  assert.equal(b.calibration.reduce((s, x) => s + x.n, 0), rows.length);
+  assert.equal(b.pending, 0);
+  assert.equal(b.since, D);
+  assert.equal(b.recent.length, Math.min(12, rows.length));
+  assert.equal(b.overall.verdict, "too early", "a handful of games proves nothing, and it says so");
+}));
+
+test("forecast: /api/grade settles bets AND forecasts, and the bet summary keeps its shape", afterGames(async () => {
+  await runThenFinish();
+  const { POST } = await import("../src/app/api/grade/route");
+  const res = (await (await POST(new NextRequest("http://x/api/grade", { method: "POST" }))).json()) as Record<string, unknown> & { forecasts: { graded: number; wins: number; losses: number; voided: number } };
+  for (const k of ["graded", "wins", "losses", "pushes", "voided"]) assert.equal(typeof res[k], "number", `bet summary still has ${k}`);
+  assert.ok((res.graded as number) > 0, `the bets were graded — response was ${JSON.stringify(res)}`);
+  const total = (await db.select().from(forecasts)).length;
+  assert.equal(res.forecasts.graded, total, "and so were the forecasts");
+  assert.equal((await db.select().from(forecasts)).filter((f) => f.outcome === "pending").length, 0);
+}));
 
 test("LLM review is bounded: it can trim a little, veto a few, and a hostile model cannot wipe out the card", async () => {
   const keys = { openrouter: "test-key" };

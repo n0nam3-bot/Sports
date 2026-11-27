@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildFilter, mmaMarketKey } from "../src/lib/markets";
-import { evaluateBout } from "../src/lib/mma-picks";
-import { evPerUnit, fairAmerican, impliedProb } from "../src/lib/edge";
-import { bout, idGen, odds, profile } from "./helpers";
+import { evaluateBout, forecastBout } from "../src/lib/mma-picks";
+import { devigTwoWay, evPerUnit, fairAmerican, impliedProb } from "../src/lib/edge";
+import { bout, idGen, odds, profile, teamGame } from "./helpers";
 import { selectCard } from "../src/lib/selection";
 
 const mixed = buildFilter([]);
@@ -187,4 +187,44 @@ test("clusterFor (used on stored picks) agrees with the cluster every candidate 
   assert.equal(clusterFor("fight_ml", { side: "home", line: null }), "result");
   assert.equal(clusterFor("fight_rounds", { side: "over", line: 1.5 }), "duration");
   assert.equal(clusterFor("fight_method", { side: "under", line: 3 }), "duration");
+});
+
+// ---------------------------------------------------------------------------
+// forecasts: a winner probability for every bout, bet or no bet
+// ---------------------------------------------------------------------------
+
+test("forecast: with no posted line it is the joint model's winner probability, and there is no market number", () => {
+  const g = lopsided();
+  const f = forecastBout(g)!;
+  assert.ok(f);
+  const m = g.combat!.dist;
+  assert.equal(f.pMarket, null, "ESPN published no moneyline, so there is nothing to compare with");
+  assert.equal(f.side, m.pHome >= 0.5 ? "home" : "away");
+  assert.equal(f.pick, m.pHome >= 0.5 ? g.home.name : g.away.name);
+  assert.ok(Math.abs(f.pModel - Math.max(m.pHome, 1 - m.pHome)) < 1e-12);
+  assert.ok(f.pModel > 0.5);
+  assert.match(f.note, /career stats|records only/);
+});
+
+test("forecast: a real posted moneyline is blended exactly as the moneyline bet blends it, and kept as the market number", () => {
+  const g = bout({ odds: odds({ homeML: -150, awayML: 125 }) });
+  const f = forecastBout(g)!;
+  const [mktHome] = devigTwoWay(-150, 125);
+  const mHome = g.combat!.dist.pHome;
+  const pHome = mktHome + 0.35 * (mHome - mktHome); // BLEND_TO_MODEL
+  const home = pHome >= 0.5;
+  assert.equal(f.side, home ? "home" : "away");
+  assert.ok(Math.abs(f.pModel - (home ? pHome : 1 - pHome)) < 1e-12);
+  assert.ok(Math.abs(f.pMarket! - (home ? mktHome : 1 - mktHome)) < 1e-12);
+});
+
+test("forecast: a nonsense pair of prices does not pose as a market", () => {
+  const g = bout({ odds: odds({ homeML: -100000, awayML: 100000 }) });
+  const f = forecastBout(g)!;
+  assert.equal(f.pMarket, null);
+  assert.ok(Math.abs(f.pModel - Math.max(g.combat!.dist.pHome, 1 - g.combat!.dist.pHome)) < 1e-12, "falls back to the model alone");
+});
+
+test("forecast: only a fight has one — a team game has no combat model", () => {
+  assert.equal(forecastBout(teamGame()), null);
 });

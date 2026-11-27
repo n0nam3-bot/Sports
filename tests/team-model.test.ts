@@ -2,12 +2,15 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildFilter } from "../src/lib/markets";
 import {
+  PARAMS,
   evaluateTeamGame,
+  forecastTeam,
   marketView,
   readGame,
   spreadPush,
   totalPush,
 } from "../src/lib/team-model";
+import { shiftProb } from "../src/lib/edge";
 import { selectCard } from "../src/lib/selection";
 import { idGen, odds, team, teamGame } from "./helpers";
 import type { RestInfo } from "../src/lib/espn";
@@ -297,5 +300,67 @@ test("an NHL slate with a tired road team: honest probabilities, nothing absurd"
     assert.ok(c.modelProb > 0.05 && c.modelProb < 0.95);
     // the edge from rest alone is small in hockey: nothing should look like a 10%+ EV windfall
     assert.ok(c.ev < 0.08, `${c.category} EV ${(c.ev * 100).toFixed(1)}% looks too good to be true`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// forecasts: a prediction for every game, whether or not anything is worth betting
+// ---------------------------------------------------------------------------
+
+test("forecast: it is the moneyline's own model probability — market, nudged — for the side we favour", () => {
+  const g = teamGame({ rest: rest({ awayB2B: true }) }); // the away side is on a back-to-back
+  const intel = readGame(g);
+  const f = forecastTeam(g, intel)!;
+  assert.ok(f, "a readable game with a posted moneyline always gets a forecast");
+  assert.equal(f.side, "home", "BOS is the market favourite (-170)");
+  assert.equal(f.pick, g.home.name);
+  assert.ok(intel.dm > 0, "the away back-to-back shifts the margin toward the home side");
+  const mkt = intel.market.pMlHome!;
+  assert.ok(Math.abs(f.pMarket! - mkt) < 1e-12);
+  assert.ok(Math.abs(f.pModel - shiftProb(mkt, intel.dm, PARAMS.nba.sigmaMargin)) < 1e-12);
+  assert.ok(f.pModel > f.pMarket!, "the adjustment pushes our number above the market's");
+  assert.ok(f.pModel >= 0.5);
+  assert.equal(f.eventId, g.eventId);
+  assert.equal(f.sport, "nba");
+  assert.match(f.note, /rest/);
+});
+
+test("forecast: with no situational edge the forecast IS the market — and it is still given", () => {
+  const g = teamGame({ rest: rest() });
+  // nothing in this game is worth a bet (every candidate has negative EV, see the first test) …
+  assert.ok(evaluateTeamGame(g, mixed, idGen()).cands.every((c) => c.ev < 0));
+  // … but a prediction still exists
+  const f = forecastTeam(g, readGame(g))!;
+  assert.ok(f);
+  assert.ok(Math.abs(f.pModel - f.pMarket!) < 1e-6);
+  assert.equal(f.note, "no situational edge");
+});
+
+test("forecast: an away favourite is picked as the away side, with both probabilities from its point of view", () => {
+  const g = teamGame({ odds: odds({ homeML: 130, awayML: -150, homeSpread: 2.5 }), rest: rest() });
+  const intel = readGame(g);
+  const f = forecastTeam(g, intel)!;
+  assert.equal(f.side, "away");
+  assert.equal(f.pick, g.away.name);
+  assert.ok(f.pModel >= 0.5 && f.pMarket! >= 0.5);
+  assert.ok(Math.abs(f.pMarket! - (1 - intel.market.pMlHome!)) < 1e-12);
+});
+
+test("forecast: nothing honest to say → none (unreadable game, no moneyline, unfetched injuries)", () => {
+  const noMl = teamGame({ odds: odds({ homeML: null, awayML: null }) });
+  assert.equal(forecastTeam(noMl, readGame(noMl)), null, "no moneyline → no market to anchor to");
+  const blind = teamGame({ context: { homeProbables: [], awayProbables: [], notes: [], lineupPosted: false, injuriesChecked: false, predictor: null } });
+  assert.equal(readGame(blind).usable, false);
+  assert.equal(forecastTeam(blind, readGame(blind)), null, "'no injuries listed' is not 'we never looked'");
+  const noLines = teamGame({ odds: null });
+  assert.equal(forecastTeam(noLines, readGame(noLines)), null);
+});
+
+test("forecast: every sport with parameters can be forecast, and it never leaves the 0.5–1 range", () => {
+  for (const sport of Object.keys(PARAMS)) {
+    const g = teamGame({ sport, rest: rest({ homeB2B: true, awayB2B: false }), odds: odds({ homeML: -250, awayML: 205 }) });
+    const f = forecastTeam(g, readGame(g));
+    assert.ok(f, sport);
+    assert.ok(f!.pModel >= 0.5 && f!.pModel < 1, `${sport}: ${f!.pModel}`);
   }
 });
