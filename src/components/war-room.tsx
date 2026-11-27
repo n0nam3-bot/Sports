@@ -9,6 +9,7 @@ import {
 import type { BetC, Discipline, GameC, PredC, RunC, SlateResp } from "./types";
 import { CategoryChip, Chip, ConfBar, NeonButton, OutcomeChip, Panel, PriceChip, ProbBar, TeamMark, cx, fmtOdds } from "./ui";
 import { BetControl, type BetSavePayload } from "./bet-control";
+import ForecastPanel from "./forecast-panel";
 import { MARKET_OPTIONS, optionsForSports, type MarketOption } from "@/lib/markets";
 import { DISCIPLINES } from "@/lib/discipline";
 import { fairAmerican } from "@/lib/edge";
@@ -487,6 +488,9 @@ export default function WarRoom(props: {
           </div>
         </div>
       )}
+
+      {/* ============ a prediction for every game — bet or no bet ============ */}
+      <ForecastPanel date={props.date} sports={props.sports} card={card} boardCount={slate?.counts.pre ?? null} />
 
       {/* ============ slate board ============ */}
       <section className="space-y-4">

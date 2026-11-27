@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Crosshair, Hexagon, Layers, Users, ScrollText, Zap, Radio, Cpu, KeyRound, Wallet,
+  Crosshair, Hexagon, Layers, Users, ScrollText, Zap, Radio, Cpu, KeyRound, Wallet, Target,
 } from "lucide-react";
 import type { AgentC, BetC, BetResult, BetSummaryC, Discipline, RunC, SlateResp } from "./types";
 import { cx } from "./ui";
@@ -23,6 +23,7 @@ import AgentsView from "./agents-view";
 import RunsView from "./runs-view";
 import { ledgerCount } from "./ledger";
 import { MyBetsView } from "./my-bets-view";
+import ScoreboardView from "./scoreboard-view";
 import type { BetSavePayload } from "./bet-control";
 import { RELEASE_LABEL } from "@/lib/release";
 
@@ -45,7 +46,7 @@ function etToday(): string {
 }
 
 export default function AppShell() {
-  const [tab, setTab] = useState<"war" | "agents" | "ledger" | "bets">("war");
+  const [tab, setTab] = useState<"war" | "agents" | "ledger" | "score" | "bets">("war");
   const [date, setDate] = useState(etToday());
   const [sports, setSports] = useState<string[]>(["nba"]);
   const [slate, setSlate] = useState<SlateResp | null>(null);
@@ -281,11 +282,14 @@ export default function AppShell() {
     try {
       const res = await vaultFetch("/api/grade", { method: "POST" }, vault, { llmMode });
       const data = await res.json();
+      // forecasts of finished games are scored too (the Scoreboard) — even when there were no bets to settle
+      const fc: number = data.forecasts?.graded ?? 0;
+      const fcNote = fc ? ` ${fc} game forecast${fc === 1 ? "" : "s"} scored — see the Scoreboard.` : "";
       if (data.error) flash(`grading fault: ${data.error}`);
-      else if (data.graded === 0 && !data.voided) flash("no settled games yet — check back after final whistles");
+      else if (data.graded === 0 && !data.voided) flash(fc ? `no bets to settle.${fcNote}` : "no settled games yet — check back after final whistles");
       else
         flash(
-          `graded ${data.graded} predictions — ${data.wins}W · ${data.losses}L · ${data.pushes}P${data.voided ? ` · ${data.voided} voided` : ""}. agent ratings updated.`,
+          `graded ${data.graded} predictions — ${data.wins}W · ${data.losses}L · ${data.pushes}P${data.voided ? ` · ${data.voided} voided` : ""}. agent ratings updated.${fcNote}`,
         );
       void loadRuns(); void loadAgents(); void loadBets();
     } catch {
@@ -386,6 +390,7 @@ export default function AppShell() {
             { id: "war", label: "War Room", short: "War Room", icon: Layers, count: slate ? slate.counts.pre : null },
             { id: "agents", label: "Agent Roster", short: "Roster", icon: Users, count: agentsData.length || null },
             { id: "ledger", label: "Prediction Ledger", short: "Ledger", icon: ScrollText, count: ledgerCount(runsData) || null },
+            { id: "score", label: "Scoreboard", short: "Scoreboard", icon: Target, count: null },
             { id: "bets", label: "My Bets", short: "My Bets", icon: Wallet, count: bets.length || null },
           ] as const).map((t) => (
             <button
@@ -494,6 +499,7 @@ export default function AppShell() {
         {tab === "ledger" && (
           <RunsView runs={runsData} grade={grade} syncing={syncing} betsByPred={betsByPred} onSaveBet={saveBet} onRemoveBet={removeBet} />
         )}
+        {tab === "score" && <ScoreboardView />}
         {tab === "bets" && (
           <MyBetsView
             bets={bets}

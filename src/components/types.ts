@@ -1,4 +1,6 @@
-// Client-mirrored API types (kept schema-import-free so the bundle stays clean).
+// Client-mirrored API types, kept free of server imports so the bundle stays clean. The one exception is a
+// type-only import from lib/forecast (pure, no runtime code) so the Scoreboard's scoring types cannot drift.
+import type { Scoreboard } from "@/lib/forecast";
 
 export interface TeamInfoC {
   id: string; abbr: string; name: string; logo: string; color: string;
@@ -133,4 +135,42 @@ export interface BetSummaryC {
   staked: number; atRisk: number; pnl: number; roi: number | null; winRate: number | null;
   followAllPnl: number | null; followAllBets: number; vsFollowAll: number | null;
   bySport: BreakdownC[]; byCategory: BreakdownC[];
+}
+
+/** A prediction for one game (GET /api/forecasts): our win probability for the side we favour, next to the vig-free market's. NOT a bet. */
+export interface ForecastC {
+  id: number;
+  sport: string;
+  eventId: string;
+  matchup: string;
+  startTime: string;
+  pick: string;
+  side: "home" | "away";
+  /** our P(pick wins), always >= 0.5 */
+  pModel: number;
+  /** the market's P(pick wins); below 0.5 when it favours the other side; null with no posted moneyline */
+  pMarket: number | null;
+  note: string;
+  /** pending | win | loss | void — win = the PICK won */
+  outcome: string;
+  finalScore: string | null;
+}
+
+/** GET /api/scoreboard — the scoring types come straight from lib/forecast, so they cannot drift from the server. */
+export interface ScoreboardC extends Scoreboard {
+  asOf: string;
+  /** earliest game in the scored window */
+  since: string | null;
+  /** forecasts still waiting for their game to finish */
+  pending: number;
+  recent: {
+    slateDate: string;
+    sport: string;
+    matchup: string;
+    pick: string;
+    pModel: number;
+    pMarket: number | null;
+    outcome: string;
+    finalScore: string | null;
+  }[];
 }
